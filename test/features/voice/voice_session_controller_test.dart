@@ -393,7 +393,7 @@ void main() {
     });
 
     test('onPressStart/onPressEnd (the PTT touch handlers) assert if called on '
-        'a free-conversation controller — RobotFaceScreen is responsible for '
+        'a free-conversation controller — RobotHomeScreen is responsible for '
         'never wiring them up to touch in this mode, and this is the '
         'debug-mode backstop against doing so accidentally', () async {
       await connectAndSettle();

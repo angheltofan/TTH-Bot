@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tth_bot/features/activities/activity.dart';
 import 'package:tth_bot/features/activities/activity_repository.dart';
-import 'package:tth_bot/features/activities/activity_selector_screen.dart';
 import 'package:tth_bot/features/robot/robot_home_screen.dart';
 import 'package:tth_bot/features/voice/gemini_auth.dart';
 
@@ -107,7 +106,6 @@ void main() {
     final repository = _FakeActivityRepository([_basketball, _riddles]);
     await _pump(tester, repository);
 
-    expect(find.byType(ActivitySelectorScreen), findsNothing);
     expect(find.text('Alege o activitate:'), findsNothing);
     expect(find.text('Baschet'), findsNothing);
     expect(find.text('Ghicitori'), findsNothing);

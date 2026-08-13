@@ -7,7 +7,6 @@ import 'gemini_auth.dart';
 import 'gemini_live_service.dart';
 import 'microphone_service.dart';
 import 'pcm_audio_player.dart';
-import 'pcm_levels.dart';
 
 enum ConversationState {
   disconnected,
@@ -82,12 +81,6 @@ class VoiceSessionController extends ChangeNotifier {
   /// open so [resumeFromOverlay] doesn't have to reconnect.
   bool _suspended = false;
   bool get isSuspended => _suspended;
-
-  /// How many of the current turn's audio chunks have been logged via
-  /// `[AudioDebug]` — capped at [_maxAudioDebugChunksPerTurn] so a long
-  /// response doesn't spam the log; reset at the start of every turn.
-  int _turnAudioDebugChunkCount = 0;
-  static const int _maxAudioDebugChunksPerTurn = 3;
 
   /// Where the state machine settles between turns: back to `ready`
   /// (waiting for a press) for push-to-talk, or `listening` for free
@@ -355,19 +348,7 @@ class VoiceSessionController extends ChangeNotifier {
             _state == ConversationState.listening) {
           _player.startTurn();
           _setState(ConversationState.speaking);
-          _turnAudioDebugChunkCount = 0;
           debugPrint('[VAD] model turn started');
-        }
-        if (_turnAudioDebugChunkCount < _maxAudioDebugChunksPerTurn) {
-          // DEV-ONLY: compares Gemini's actual output signal level between
-          // interaction modes — see the Phase 4B stabilization report. If
-          // this reads roughly the same in both modes (expected), the
-          // low-volume bug is in routing/playback, not the PCM itself.
-          debugPrint(
-            '[AudioDebug] mode=${_interactionMode.dbValue} '
-            '${computePcmLevels(pcm16)}',
-          );
-          _turnAudioDebugChunkCount++;
         }
         _player.feed(pcm16);
 
@@ -422,11 +403,20 @@ class VoiceSessionController extends ChangeNotifier {
 
   @override
   void dispose() {
-    _stopMicrophone();
+    // Sequenced rather than two independent fire-and-forget calls:
+    // MicrophoneService.dispose() tears down the same AudioRecorder
+    // instance _stopMicrophone()'s _mic.stop() is still completing on, so
+    // firing both from here without ordering could dispose the recorder
+    // while stop() was still in flight on it.
+    _disposeMicrophone();
     _liveSub?.cancel();
-    _mic.dispose();
     _live.dispose();
     _player.dispose();
     super.dispose();
+  }
+
+  Future<void> _disposeMicrophone() async {
+    await _stopMicrophone();
+    await _mic.dispose();
   }
 }

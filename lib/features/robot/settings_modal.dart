@@ -227,17 +227,6 @@ class _ActivityTile extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
 
-  static String _typeLabel(ActivityType type) => switch (type) {
-    ActivityType.lesson => 'Lecție',
-    ActivityType.game => 'Joc',
-    ActivityType.conversation => 'Conversație',
-  };
-
-  static String _modeLabel(InteractionMode mode) => switch (mode) {
-    InteractionMode.pushToTalk => 'Push-to-talk',
-    InteractionMode.freeConversation => 'Hands-free',
-  };
-
   static IconData _typeIcon(ActivityType type) => switch (type) {
     ActivityType.lesson => Icons.menu_book_rounded,
     ActivityType.game => Icons.sports_esports_rounded,
@@ -294,7 +283,7 @@ class _ActivityTile extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      '${_typeLabel(activity.type)} · ${_modeLabel(activity.interactionMode)}',
+                      '${activity.type.label} · ${activity.interactionMode.label}',
                       style: const TextStyle(
                         color: TthColors.webTextMuted,
                         fontSize: 12,

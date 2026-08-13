@@ -22,12 +22,11 @@ extension ActivityTypeDb on ActivityType {
 /// How the child interacts with TTH Bot during this activity. Maps to the
 /// `interaction_mode` check constraint in the `activities` table.
 enum InteractionMode {
-  /// Press-and-hold to talk, release to let Gemini respond. The only mode
-  /// implemented so far.
+  /// Press-and-hold to talk, release to let Gemini respond.
   pushToTalk,
 
-  /// Hands-free, server-side VAD. Reserved for a later milestone — nothing
-  /// in this app implements it yet.
+  /// Hands-free, continuous listening driven by server-side VAD — no press
+  /// required. See `VoiceSessionController.startFreeConversation`.
   freeConversation,
 }
 
@@ -43,6 +42,28 @@ extension InteractionModeDb on InteractionMode {
     _ => throw FormatException(
       'Unknown interaction mode from database: $value',
     ),
+  };
+}
+
+/// User-facing Romanian labels, shared by the Android settings modal and
+/// the Web activity list/form so both surfaces always describe the same
+/// activity the same way — previously each screen defined its own copy of
+/// these switches, and they had quietly drifted apart for
+/// [InteractionMode.freeConversation] ("Hands-free" on Android vs.
+/// "Conversație liberă" on Web, the latter matching the activity's own
+/// Romanian title in seed data).
+extension ActivityTypeLabel on ActivityType {
+  String get label => switch (this) {
+    ActivityType.lesson => 'Lecție',
+    ActivityType.game => 'Joc',
+    ActivityType.conversation => 'Conversație',
+  };
+}
+
+extension InteractionModeLabel on InteractionMode {
+  String get label => switch (this) {
+    InteractionMode.pushToTalk => 'Push-to-talk',
+    InteractionMode.freeConversation => 'Conversație liberă',
   };
 }
 

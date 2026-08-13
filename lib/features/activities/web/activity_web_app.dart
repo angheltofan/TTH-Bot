@@ -321,7 +321,7 @@ class _ActivityCard extends StatelessWidget {
             _StatusChip(enabled: activity.enabled),
             const SizedBox(height: 10),
             Text(
-              '${_typeLabel(activity.type)} · ${_modeLabel(activity.interactionMode)}',
+              '${activity.type.label} · ${activity.interactionMode.label}',
               textAlign: TextAlign.center,
               style: const TextStyle(
                 color: TthColors.webTextMuted,
@@ -365,17 +365,6 @@ class _ActivityCard extends StatelessWidget {
       ),
     );
   }
-
-  static String _typeLabel(ActivityType type) => switch (type) {
-    ActivityType.lesson => 'Lecție',
-    ActivityType.game => 'Joc',
-    ActivityType.conversation => 'Conversație',
-  };
-
-  static String _modeLabel(InteractionMode mode) => switch (mode) {
-    InteractionMode.pushToTalk => 'Push-to-talk',
-    InteractionMode.freeConversation => 'Conversație liberă',
-  };
 
   static String _participantsSummary(List<String> participants) {
     const maxShown = 4;

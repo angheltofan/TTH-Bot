@@ -360,11 +360,11 @@ class GeminiLiveService {
       switch (event) {
         case GeminiSetupComplete():
           debugPrint('[GeminiLive] setupComplete');
-        case GeminiAudioChunk(:final pcm16):
-          debugPrint(
-            '[GeminiLive] audio chunk received (${pcm16.length} '
-            'bytes)',
-          );
+        case GeminiAudioChunk():
+          // Deliberately not logged per chunk — a turn can be dozens of
+          // chunks, and GeminiSetupComplete/TurnComplete/Interrupted below
+          // already show a turn's lifecycle without that noise.
+          break;
         case GeminiTurnComplete():
           debugPrint('[GeminiLive] turnComplete');
         case GeminiInterrupted():

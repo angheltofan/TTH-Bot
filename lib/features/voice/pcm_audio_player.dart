@@ -77,20 +77,9 @@ class PcmAudioPlayer {
     }
     SoLoud.instance.addAudioDataStream(stream, pcm16);
     if (_awaitingFirstChunk) {
-      final handle = SoLoud.instance.play(stream);
+      SoLoud.instance.play(stream);
       _awaitingFirstChunk = false;
       debugPrint('[PcmAudioPlayer] playback started');
-      // DEV-ONLY diagnostic for the Phase 4B low-volume investigation: if
-      // this ever reads below 1.0, playback volume itself (not routing) is
-      // the culprit — see the stabilization report for how this was ruled
-      // out. Neither of these is ever set anywhere else in this app, so
-      // both are expected to always read as their SoLoud default (1.0).
-      debugPrint(
-        '[AudioDebug] soloud global volume='
-        '${SoLoud.instance.getGlobalVolume().toStringAsFixed(2)} '
-        'playback volume='
-        '${SoLoud.instance.getVolume(handle).toStringAsFixed(2)}',
-      );
     }
     _updateAmplitude(pcm16);
   }
