@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& \"C:\\\\Android\\\\Sdk\\\\platform-tools\\\\adb.exe\" devices 2>&1)",
+      "Bash(flutter analyze *)",
+      "Bash(flutter test *)",
+      "Bash(flutter build *)",
+      "PowerShell(& \"C:\\\\Android\\\\Sdk\\\\platform-tools\\\\adb.exe\" devices -l 2>&1)",
+      "Bash(supabase projects *)",
+      "Bash(supabase link *)",
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(dart format *)",
+      "Bash(supabase migration *)",
+      "Bash(flutter run *)",
+      "Bash(find \"/c/pub-cache/hosted/pub.dev/record_platform_interface-1.6.0/lib/src/types\" -iname \"*android*\" 2>&1)",
+      "Read(//c/pub-cache/hosted/pub.dev/record_platform_interface-1.6.0/lib/src/types/**)",
+      "Bash(git restore *)",
+      "Bash(git rm *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
