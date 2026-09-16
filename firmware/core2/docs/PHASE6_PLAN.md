@@ -1003,7 +1003,7 @@ is applied.
 ### 12.1 Accelerated final-v1 path — progress
 
 Replaces step 6.4 (product-owner decision). Nothing is deployed publicly;
-`restrict_activity_writes` is not applied.
+the activity write restriction (§12.5) is not applied.
 
 | Step | Result |
 |---|---|
@@ -1047,9 +1047,9 @@ converted free-conversation → push-to-talk).**
 ### 12.2 Product change: on-device activity selection (V6A paused)
 
 Requirements changed after V5: the activity is chosen on the Core2; the
-former management website (`tth-bot.vercel.app`) is gone, so
-`restrict_activity_writes` stays unapplied until an authenticated management
-path exists. V6A (hosting) is paused.
+former management website (`tth-bot.vercel.app`) is gone, so the activity
+write restriction stays unapplied until an authenticated management path
+exists (now prepared: §12.5). V6A (hosting) is paused.
 
 - **Protocol (tth.v1, flat JSON ≤ 512 B):** gateway → device
   `activity_list` (one item per message: `index`, `count` ≤ 8, `activity`
@@ -1123,8 +1123,112 @@ Kept unchanged for v1, watched in production:
   removed or the alias detached (unverifiable without the Vercel account).
 - It can be rebuilt from the current source (`flutter build web --release`,
   no dart-defines, no SPA rewrites needed) — but a restored site would let
-  anyone edit robot prompts until editor sign-in exists and
-  `restrict_activity_writes` is applied. Not deployed.
+  anyone edit robot prompts until editor sign-in exists and the write
+  restriction is applied. Not deployed. Superseded by §12.5.
+
+### 12.5 Authenticated web editor (implemented and verified locally; not applied, not deployed)
+
+The Flutter web editor (`ActivityWebApp`) is restored behind a sign-in. The
+**database** is the security boundary; the login page is a convenience.
+
+**Database — `supabase/migrations/20260916120000_activity_admin_writes.sql`.**
+It replaces the former pending `restrict_activity_writes` design (deleted),
+which trusted an `app_metadata` role, gave signed-in users no SELECT and left
+the broad grants, including TRUNCATE, which RLS does not cover.
+
+| Role | `public.activities` after the migration |
+|---|---|
+| `anon` (publishable key: gateway, Android app) | SELECT only; INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER revoked |
+| `authenticated` | SELECT for all; INSERT/UPDATE/DELETE only if `private.is_activity_admin()`; TRUNCATE/REFERENCES/TRIGGER revoked |
+| `service_role`, Dashboard | unchanged |
+
+- **Allow-list:** `private.activity_admins (user_id → auth.users, on delete
+  cascade)`:
+  - a unique index on `((true))` allows **at most one** row;
+  - RLS is on with no policies, and there are no grants to anon or authenticated;
+  - schema `private` is not exposed by the Data API.
+- **Admin check:** `private.is_activity_admin()`, a `security definer` function
+  with `search_path = ''` that tests `auth.uid()` against the list. Only
+  `authenticated` may execute it.
+- **Existing rows:** no activity row is touched.
+
+**Web app.**
+- **Login mapping:** the visible username `admin` maps to the internal Supabase
+  Auth email, compiled in with `--dart-define=TTH_ADMIN_AUTH_EMAIL` (see
+  `scripts/build_web.ps1`) and kept out of Git.
+  - The email is never shown or logged, but it is present in the downloaded
+    JavaScript.
+  - Any other username fails before any network call.
+- **Login page** (`AdminLoginScreen`):
+  - Utilizator + Parolă only; one generic failure message for every cause;
+  - no sign-up, no reset link;
+  - the password field is cleared after every attempt.
+- **Gate** (`AdminAuthGate`):
+  - a valid stored session is restored, and an expired one waits for its refresh;
+  - the gate returns to login, closing open forms, on logout, on an
+    involuntary sign-out, on a request rejected for an expired session, and when
+    the session stays expired for two 20 s checks;
+  - it shows a configuration message if no admin email was built in.
+- **Editor:**
+  - **Deconectare** button;
+  - fixed Romanian error messages (`activity_failure.dart`); raw Supabase errors
+    are never shown or logged;
+  - delete requests the deleted row back and requires exactly one, because a
+    DELETE refused by RLS affects 0 rows without an error;
+  - Refresh/logout sit above the scroll view, so they are clickable;
+  - phone-width layout fixes.
+- **Logging:** `Supabase.initialize(debug: false)`.
+
+**Verification done locally.**
+- **Flutter:**
+  - `flutter analyze`: clean;
+  - `flutter test`: all pass, including the gate, login, auth adapter (real
+    `GoTrueClient` against a mock HTTP client), repository, and log-redaction
+    tests, plus phone (360×740) and desktop (1280×800) layout tests.
+- **SQL:** migration and DB test parsed with PostgreSQL's parser (libpg_query),
+  including every PL/pgSQL block.
+- **Release build** with a test email:
+  - no JWT, secret key, private key, source map or test credential in the output;
+  - login and editor screenshots checked at 390 px and 1280 px.
+
+**Live verification design (after the migration).** No test user is ever
+inserted into `auth.users`, and TRUNCATE is never executed.
+
+| What | How |
+|---|---|
+| Public anon key: SELECT works; INSERT/UPDATE/DELETE refused; allow-list not exposed; activities unchanged | `scripts/check_activity_anon_access.ps1` (REST, publishable key). The INSERT body is invalid and UPDATE/DELETE target a UUID that matches nothing, so no real row can change even if a check fails. Prints statuses, error codes, count and SHA-256 only. |
+| Grants, policies, RLS flags, single-admin index, no TRUNCATE for anon/authenticated | `supabase/tests/activity_admin_rls.sql`, catalog checks |
+| Signed-in non-admin: SELECT works; INSERT refused; UPDATE/DELETE match 0 rows; allow-list unreadable/unwritable | same SQL file, with an arbitrary UUID in `request.jwt.claims` (no `auth.users` row); one transaction ending in ROLLBACK |
+| Administrator write path | Manual, only once the real account exists: in the web editor, create one activity titled `TEMP – test administrator (șterge)`, edit it, delete it. Then the anon check with `-ExpectedHash <baseline>` confirms the original activities are byte-identical. |
+
+**Order to apply (each step needs approval).**
+1. Baseline (read-only): `scripts/check_activity_anon_access.ps1
+   -BaselineOnly`; record the count (4) and the SHA-256.
+2. From the worktree containing the migration: `supabase db push --dry-run`
+   must list only `20260916120000_activity_admin_writes.sql`; then `supabase db
+   push`.
+3. `supabase db query --linked -f supabase/tests/activity_admin_rls.sql`.
+   - It refuses to run before the migration exists.
+   - On success it prints `activity_admin_rls: all checks passed`; any
+     `FAIL: …` aborts and rolls back the transaction. Treat any reported error
+     as a failure.
+4. `scripts/check_activity_anon_access.ps1 -ExpectedHash <baseline>`: all
+   PASS.
+5. Product owner, in the Dashboard: disable public sign-up; create the
+   administrator with Auto Confirm User, typing the password themselves. If
+   the password is rejected by the project's password rules, that is a
+   product-owner decision; the rules are not changed silently.
+6. Enrol the administrator in the SQL Editor (no password involved):
+   `insert into private.activity_admins (user_id) select id from auth.users
+   where email = '<internal email>' returning user_id;` — exactly one row.
+7. Build with `scripts/build_web.ps1 -AdminAuthEmail <internal email>`.
+8. Administrator write-path test in the web editor (above), then step 4
+   again with the baseline hash; the gateway still loads its activity.
+9. `vercel login` (browser), link `build/web` to the existing project or a new
+   `tth-bot` project, `vercel deploy --prod`, alias `tth-bot.vercel.app` if it
+   is still available to the account.
+10. Smoke test the live site: login, a wrong password (generic message),
+    logout.
 
 ## 13. Files
 
@@ -1132,15 +1236,17 @@ Kept unchanged for v1, watched in production:
 `src/generated/edubot_base_prompt.ts`, `Dockerfile`, README,
 `.env.example` with no values); `supabase/functions/gateway-gemini-token/`
 (+ tests); `supabase/migrations/…_gateway_mint_admit.sql`;
-`supabase/migrations/…_restrict_activity_writes.sql` (not applied);
+`supabase/migrations/…_activity_admin_writes.sql` (§12.5, not applied) and
+`supabase/tests/activity_admin_rls.sql`, `scripts/check_activity_anon_access.ps1`,
+`scripts/build_web.ps1`;
 `firmware/core2/lib/tth_core/…`: `GatewayProtocol`, `TurnIdAllocator`,
 `OutboundQueue`, `DownstreamCredit` (+ tests). Later steps: the §6 device
 components, `tools/provision.py`.
 
 **Modified:** `supabase/config.toml` (`[functions.gateway-gemini-token]`),
 `.gitignore`, READMEs. **Unchanged:** the existing `gemini-token` function
-and the Flutter app. The web sign-in that the RLS migration needs is a
-**separately reviewed Flutter change**.
+and the Android Flutter app. The web sign-in the RLS migration needs
+(`lib/features/auth/`, §12.5) was a separately reviewed Flutter change.
 
 ---
 
@@ -1154,8 +1260,10 @@ and the Flutter app. The web sign-in that the RLS migration needs is a
 3. **Certificate dates are unchecked** → a real residual gap. Pinned CA +
    hostname verification + revocable tokens + a rotation path limit the
    exposure; certificate lifetime does not.
-4. The RLS migration disables web editing until the web app signs in → a
-   Flutter change to review; applying the migration first is fail-safe.
+4. The RLS migration disables web editing for everyone except the
+   allow-listed administrator; a web build deployed before the migration is
+   applied would still let the publishable key write. Apply the migration
+   before (or together with) the deployment (§12.5).
 5. The existing `gemini-token` stays unauthenticated for Flutter → a
    pre-existing risk, unchanged; the gateway never uses it. Option A is the
    path to closing it.

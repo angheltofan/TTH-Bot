@@ -131,9 +131,11 @@ goes onto the robot.
 
 1. `gateway-gemini-token` is deployed with its secret, and the migration
    `supabase/migrations/20260911190000_gateway_mint_admit.sql` is applied;
-2. `supabase/pending/20260911190100_restrict_activity_writes.sql` is applied
-   (anonymous prompt writes disabled — this stops web editing until the web
-   app signs in as an editor).
+2. `supabase/migrations/20260916120000_activity_admin_writes.sql` is applied
+   (anonymous prompt writes disabled; only the single allow-listed
+   administrator, signed in to the web editor, can change activities — see
+   `firmware/core2/docs/PHASE6_PLAN.md` §12.5). The gateway keeps reading
+   activities with the publishable key.
 
 ```bash
 # Supabase (from the repo root)

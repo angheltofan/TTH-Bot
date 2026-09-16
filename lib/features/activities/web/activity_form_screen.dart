@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../activity.dart';
+import '../activity_failure.dart';
 import '../activity_repository.dart';
 import '../participants.dart';
 
@@ -14,10 +15,14 @@ class ActivityFormScreen extends StatefulWidget {
     super.key,
     required this.repository,
     this.existing,
+    this.onSessionExpired,
   });
 
   final ActivityRepository repository;
   final Activity? existing;
+
+  /// Called when saving fails because the session is no longer valid.
+  final VoidCallback? onSessionExpired;
 
   @override
   State<ActivityFormScreen> createState() => _ActivityFormScreenState();
@@ -95,10 +100,14 @@ class _ActivityFormScreenState extends State<ActivityFormScreen> {
       Navigator.of(context).pop(true);
     } catch (e) {
       if (!mounted) return;
+      final failure = activityFailureOf(e);
       setState(() {
-        _errorMessage = 'Eroare la salvare: $e';
+        _errorMessage = activityFailureMessage(failure, ActivityAction.save);
         _saving = false;
       });
+      if (failure == ActivityFailure.sessionExpired) {
+        widget.onSessionExpired?.call();
+      }
     }
   }
 
@@ -134,6 +143,7 @@ class _ActivityFormScreenState extends State<ActivityFormScreen> {
                     const SizedBox(height: 16),
                     DropdownButtonFormField<ActivityType>(
                       initialValue: _type,
+                      isExpanded: true,
                       decoration: const InputDecoration(labelText: 'Tip'),
                       items: const [
                         DropdownMenuItem(
@@ -183,6 +193,7 @@ class _ActivityFormScreenState extends State<ActivityFormScreen> {
                     const SizedBox(height: 16),
                     DropdownButtonFormField<InteractionMode>(
                       initialValue: _interactionMode,
+                      isExpanded: true,
                       decoration: const InputDecoration(
                         labelText: 'Mod conversație',
                       ),
@@ -238,8 +249,12 @@ class _ActivityFormScreenState extends State<ActivityFormScreen> {
                           style: const TextStyle(color: Colors.redAccent),
                         ),
                       ),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    // Wrap, not Row: the buttons stack on a narrow phone
+                    // instead of overflowing.
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      spacing: 12,
+                      runSpacing: 8,
                       children: [
                         OutlinedButton(
                           onPressed: _saving
@@ -247,7 +262,6 @@ class _ActivityFormScreenState extends State<ActivityFormScreen> {
                               : () => Navigator.of(context).pop(false),
                           child: const Text('Anulează'),
                         ),
-                        const SizedBox(width: 12),
                         FilledButton(
                           onPressed: _saving ? null : _save,
                           child: _saving

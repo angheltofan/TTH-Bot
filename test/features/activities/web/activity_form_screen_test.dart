@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tth_bot/features/activities/activity.dart';
+import 'package:tth_bot/features/activities/activity_failure.dart';
 import 'package:tth_bot/features/activities/activity_repository.dart';
 import 'package:tth_bot/features/activities/web/activity_form_screen.dart';
 
@@ -58,6 +59,7 @@ Future<void> _pump(
   required _FakeActivityRepository repository,
   Activity? existing,
   _PopResult? popResult,
+  VoidCallback? onSessionExpired,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -71,6 +73,7 @@ Future<void> _pump(
                     builder: (_) => ActivityFormScreen(
                       repository: repository,
                       existing: existing,
+                      onSessionExpired: onSessionExpired,
                     ),
                   ),
                 );
@@ -181,6 +184,72 @@ void main() {
       await _tapSave(tester);
 
       expect(find.textContaining('Eroare la salvare'), findsOneWidget);
+      expect(find.textContaining('network down'), findsNothing);
+      expect(find.textContaining('Exception'), findsNothing);
     },
   );
+
+  testWidgets('a save refused by the database shows the permission message '
+      'and keeps the form open', (tester) async {
+    final repository = _FakeActivityRepository()
+      ..saveError = const ActivityRepositoryException(
+        ActivityFailure.permissionDenied,
+      );
+    final popResult = _PopResult();
+    await _pump(
+      tester,
+      repository: repository,
+      existing: _existing,
+      popResult: popResult,
+    );
+
+    await _tapSave(tester);
+
+    expect(
+      find.text(
+        'Eroare la salvare: nu ai permisiunea să modifici activitățile.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Editează activitate'), findsOneWidget);
+    expect(popResult.value, isNull);
+  });
+
+  testWidgets('an update that changed nothing is reported, not treated as '
+      'saved', (tester) async {
+    final repository = _FakeActivityRepository()
+      ..saveError = const ActivityRepositoryException(
+        ActivityFailure.notChanged,
+      );
+    await _pump(tester, repository: repository, existing: _existing);
+
+    await _tapSave(tester);
+
+    expect(
+      find.text(
+        activityFailureMessage(ActivityFailure.notChanged, ActivityAction.save),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a save rejected for an expired session reports it', (
+    tester,
+  ) async {
+    var expired = 0;
+    final repository = _FakeActivityRepository()
+      ..saveError = const ActivityRepositoryException(
+        ActivityFailure.sessionExpired,
+      );
+    await _pump(
+      tester,
+      repository: repository,
+      existing: _existing,
+      onSessionExpired: () => expired++,
+    );
+
+    await _tapSave(tester);
+
+    expect(expired, 1);
+  });
 }

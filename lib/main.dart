@@ -8,6 +8,8 @@ import 'core/theme/tth_web_theme.dart';
 import 'features/activities/activity_repository.dart';
 import 'features/activities/supabase_activity_repository.dart';
 import 'features/activities/web/activity_web_app.dart';
+import 'features/auth/admin_auth.dart';
+import 'features/auth/admin_auth_gate.dart';
 import 'features/robot/robot_home_screen.dart';
 import 'features/voice/gemini_auth.dart';
 import 'features/voice/gemini_token_service.dart';
@@ -30,14 +32,18 @@ Future<void> main() async {
     await Supabase.initialize(
       url: SupabaseConfig.url,
       publishableKey: SupabaseConfig.publishableKey,
+      // The Supabase SDK debug log can include auth events and request
+      // details; keep it off in every build.
+      debug: false,
     );
     supabaseClient = Supabase.instance.client;
     activityRepository = SupabaseActivityRepository(supabaseClient);
     debugPrint('[Supabase] initialized; using SupabaseActivityRepository');
-  } catch (e, stackTrace) {
+  } catch (e) {
+    // Only the error type: Supabase error text is never logged.
     debugPrint(
-      '[Supabase] initialize failed, falling back to hardcoded activities: '
-      '$e\n$stackTrace',
+      '[Supabase] initialize failed (${e.runtimeType}), '
+      'falling back to hardcoded activities',
     );
   }
 
@@ -83,11 +89,25 @@ class TthBotApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (kIsWeb) {
+      final client = supabaseClient;
       return MaterialApp(
         title: 'TTH Bot – Activități',
         debugShowCheckedModeBanner: false,
         theme: buildTthWebTheme(),
-        home: ActivityWebApp(repository: activityRepository),
+        // The web editor is only reachable after the administrator logs
+        // in; without Supabase there is nothing it could safely do.
+        home: client == null
+            ? const AdminUnavailableScreen(
+                message: 'Serviciul nu este disponibil momentan.',
+              )
+            : AdminAuthGate(
+                auth: SupabaseAdminAuth(client.auth),
+                editorBuilder: (context, session) => ActivityWebApp(
+                  repository: activityRepository,
+                  onLogout: session.logout,
+                  onSessionExpired: session.sessionExpired,
+                ),
+              ),
       );
     }
 

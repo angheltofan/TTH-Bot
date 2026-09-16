@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../core/theme/tth_colors.dart';
 import '../activity.dart';
+import '../activity_failure.dart';
 import '../activity_repository.dart';
 import 'activity_form_screen.dart';
 
@@ -13,10 +14,25 @@ const double _pageMaxWidth = 960;
 /// `flutter run -d chrome` shows, never the robot face. A single centered
 /// column (Phase 5, Part B): no sidebar, no scattered navigation, just the
 /// Tales & Tech Hub header, a search box and the activity list.
+///
+/// Shown only behind `AdminAuthGate`. Errors are shown as fixed messages
+/// ([activityFailureMessage]); raw repository errors are never displayed
+/// or logged.
 class ActivityWebApp extends StatefulWidget {
-  const ActivityWebApp({super.key, required this.repository});
+  const ActivityWebApp({
+    super.key,
+    required this.repository,
+    this.onLogout,
+    this.onSessionExpired,
+  });
 
   final ActivityRepository repository;
+
+  /// Shows the "Deconectare" button when set.
+  final VoidCallback? onLogout;
+
+  /// Called when a request fails because the session is no longer valid.
+  final VoidCallback? onSessionExpired;
 
   @override
   State<ActivityWebApp> createState() => _ActivityWebAppState();
@@ -53,13 +69,20 @@ class _ActivityWebAppState extends State<ActivityWebApp> {
         _activities = activities;
         _state = _LoadState.loaded;
       });
-    } catch (e, stackTrace) {
-      debugPrint('[ActivityWebApp] failed to load activities: $e\n$stackTrace');
+    } catch (e) {
+      final failure = activityFailureOf(e);
+      // Only the failure kind: error text can carry server details.
+      debugPrint(
+        '[ActivityWebApp] failed to load activities (${failure.name})',
+      );
       if (!mounted) return;
       setState(() {
-        _errorMessage = e.toString();
+        _errorMessage = activityFailureMessage(failure, ActivityAction.load);
         _state = _LoadState.error;
       });
+      if (failure == ActivityFailure.sessionExpired) {
+        widget.onSessionExpired?.call();
+      }
     }
   }
 
@@ -69,6 +92,7 @@ class _ActivityWebAppState extends State<ActivityWebApp> {
         builder: (_) => ActivityFormScreen(
           repository: widget.repository,
           existing: existing,
+          onSessionExpired: widget.onSessionExpired,
         ),
       ),
     );
@@ -102,9 +126,18 @@ class _ActivityWebAppState extends State<ActivityWebApp> {
       _load();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Eroare la ștergere: $e')));
+      final failure = activityFailureOf(e);
+      if (failure == ActivityFailure.sessionExpired) {
+        widget.onSessionExpired?.call();
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(activityFailureMessage(failure, ActivityAction.delete)),
+        ),
+      );
+      // A delete that changed nothing may mean the list is stale.
+      if (failure == ActivityFailure.notChanged) _load();
     }
   }
 
@@ -121,15 +154,6 @@ class _ActivityWebAppState extends State<ActivityWebApp> {
       body: SafeArea(
         child: Stack(
           children: [
-            Positioned(
-              top: 8,
-              right: 8,
-              child: IconButton(
-                tooltip: 'Reîncarcă',
-                icon: const Icon(Icons.refresh),
-                onPressed: _state == _LoadState.loading ? null : _load,
-              ),
-            ),
             // The scrollable must span the FULL viewport width/height —
             // not just the centered content column — so the mouse wheel
             // scrolls the page no matter where the pointer is (including
@@ -158,6 +182,24 @@ class _ActivityWebAppState extends State<ActivityWebApp> {
                     ),
                   ),
                 ),
+              ),
+            ),
+            // After the scrollable, so it is on top: the full-viewport
+            // scrollable would otherwise absorb taps on these buttons.
+            Positioned(
+              top: 8,
+              right: 8,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: 'Reîncarcă',
+                    icon: const Icon(Icons.refresh),
+                    onPressed: _state == _LoadState.loading ? null : _load,
+                  ),
+                  if (widget.onLogout != null)
+                    _LogoutButton(onPressed: widget.onLogout!),
+                ],
               ),
             ),
           ],
@@ -202,6 +244,33 @@ class _ActivityWebAppState extends State<ActivityWebApp> {
           ],
         );
     }
+  }
+}
+
+/// Icon + label on wide screens; icon only on phones, where the label
+/// would run into the centered logo.
+class _LogoutButton extends StatelessWidget {
+  const _LogoutButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.sizeOf(context).width < 600) {
+      return IconButton(
+        tooltip: 'Deconectare',
+        icon: const Icon(Icons.logout),
+        onPressed: onPressed,
+      );
+    }
+    return Tooltip(
+      message: 'Deconectare',
+      child: TextButton.icon(
+        onPressed: onPressed,
+        icon: const Icon(Icons.logout),
+        label: const Text('Deconectare'),
+      ),
+    );
   }
 }
 
@@ -340,15 +409,18 @@ class _ActivityCard extends StatelessWidget {
               ),
             ],
             const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            // Wrap, not Row: on a phone the two buttons stack instead of
+            // overflowing the card.
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 12,
+              runSpacing: 8,
               children: [
                 OutlinedButton.icon(
                   onPressed: onEdit,
                   icon: const Icon(Icons.edit_outlined, size: 18),
                   label: const Text('Editează'),
                 ),
-                const SizedBox(width: 12),
                 OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.red.shade600,
@@ -431,21 +503,11 @@ class _ErrorView extends StatelessWidget {
         children: [
           Icon(Icons.cloud_off, size: 40, color: TthColors.webTextMuted),
           const SizedBox(height: 12),
-          const Text(
-            'Nu am putut încărca activitățile.',
-            style: TextStyle(color: TthColors.webTextDark),
+          Text(
+            message ?? 'Nu am putut încărca activitățile.',
+            style: const TextStyle(color: TthColors.webTextDark),
+            textAlign: TextAlign.center,
           ),
-          if (message != null) ...[
-            const SizedBox(height: 6),
-            Text(
-              message!,
-              style: const TextStyle(
-                color: TthColors.webTextMuted,
-                fontSize: 12,
-              ),
-              textAlign: TextAlign.center,
-            ),
-          ],
           const SizedBox(height: 16),
           ElevatedButton.icon(
             onPressed: onRetry,
