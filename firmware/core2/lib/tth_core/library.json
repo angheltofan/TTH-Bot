@@ -1,0 +1,10 @@
+{
+  "name": "tth_core",
+  "version": "0.1.0",
+  "description": "Hardware-free core logic for the TTH Bot Core2 firmware. Nothing in this library may include M5Unified, Arduino or any ESP32 header: it is compiled unchanged for the device and for the `native` host test environment, and that is what makes it unit-testable without hardware.",
+  "keywords": ["tth-bot"],
+  "license": "UNLICENSED",
+  "build": {
+    "libArchive": false
+  }
+}
