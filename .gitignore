@@ -61,3 +61,6 @@ firmware/core2/secrets*
 gateway/manual/last_live_probe.json
 # Phase 6.2: LAN development CA and gateway certificate + PRIVATE KEYS
 gateway/.dev-certs/
+
+# Supabase CLI link metadata (local state, never source)
+supabase/.temp/
