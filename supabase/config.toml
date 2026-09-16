@@ -387,6 +387,14 @@ deno_version = 2
 [functions.gemini-token]
 verify_jwt = false
 
+# Phase 6: the TTH gateway's token path. It authenticates the caller itself
+# with an HMAC-signed, short-lived assertion over GATEWAY_MINT_SECRET (see
+# supabase/functions/gateway-gemini-token/handler.ts), plus a nonce replay
+# store and rate limit in Postgres. JWT verification is off because a JWT
+# would require handing the gateway the service-role key.
+[functions.gateway-gemini-token]
+verify_jwt = false
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
