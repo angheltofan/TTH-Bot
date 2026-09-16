@@ -1002,8 +1002,9 @@ is applied.
 
 ### 12.1 Accelerated final-v1 path — progress
 
-Replaces step 6.4 (product-owner decision). Nothing is deployed publicly;
-the activity write restriction (§12.5) is not applied.
+Replaces step 6.4 (product-owner decision). Nothing is deployed publicly.
+The activity write restriction is applied (2026-09-16, §12.5); the web
+editor is not yet deployed.
 
 | Step | Result |
 |---|---|
@@ -1126,7 +1127,7 @@ Kept unchanged for v1, watched in production:
   anyone edit robot prompts until editor sign-in exists and the write
   restriction is applied. Not deployed. Superseded by §12.5.
 
-### 12.5 Authenticated web editor (implemented and verified locally; not applied, not deployed)
+### 12.5 Authenticated web editor (migration applied, local end-to-end test passed; not deployed)
 
 The Flutter web editor (`ActivityWebApp`) is restored behind a sign-in. The
 **database** is the security boundary; the login page is a convenience.
@@ -1229,6 +1230,49 @@ inserted into `auth.users`, and TRUNCATE is never executed.
    is still available to the account.
 10. Smoke test the live site: login, a wrong password (generic message),
     logout.
+
+**Result (2026-09-16), project TTH Bot `gashjedpdvcrzwryjiva`.** Steps 1–8
+done; steps 9–10 (Vercel) not started.
+
+- **Baseline:** 4 activities; REST SHA-256
+  `4daeb5f25c427fa5043fc9122e11911e0322b795fffc5e3e4f3dbc3ee68c72e7`
+  (identical on repeat runs).
+- **Migration:** the dry run listed only
+  `20260916120000_activity_admin_writes.sql`; `supabase db push` applied it,
+  and it is recorded remotely.
+  - **Grants:** anon SELECT only; authenticated SELECT/INSERT/UPDATE/DELETE;
+    no TRUNCATE for anon, authenticated or PUBLIC; service_role unchanged.
+  - **Policies:** exactly the five expected.
+  - **Unchanged:** `gateway_mint_nonces`, `gateway_mint_admit` and
+    `gateway-gemini-token` (v3) are identical to before; `gemini-token`
+    remains undeployed, as before.
+- **Automated checks:**
+  - `activity_admin_rls.sql`: all checks passed, with no `auth.users` insert
+    and no TRUNCATE. A deliberately failing probe confirmed that an error stops
+    the script before its pass marker.
+  - Anon REST check: SELECT 200; INSERT/UPDATE/DELETE refused (401, 42501);
+    allow-list not exposed (406, PGRST106); hash unchanged.
+  - The gateway's own loader, with the publishable key, still loads the
+    configured activity of `tth-core2-01`: enabled and usable; 4 selectable.
+- **Administrator (product owner, Dashboard):**
+  - public sign-up disabled; the public auth settings report
+    `disable_signup=true`. The first check still showed `false` because the
+    setting had not been saved; it was re-checked after saving;
+  - `admin@tth-bot.invalid` created and confirmed; the only auth user;
+  - exactly one row in `private.activity_admins`.
+- **Local end-to-end test** (release build with the internal email, served on
+  localhost; password typed only in the browser):
+  - only the login page before sign-in;
+  - `admin` login succeeded and showed the four activities;
+  - a temporary activity was created, edited and deleted;
+  - logout returned to the login page, and a refresh did not expose the editor.
+- **After the test:**
+  - exactly 4 activities, with the baseline SHA-256; no temporary rows; anon
+    writes still refused; allow-list still unreachable anonymously;
+  - the local server log held only static-file paths, with no email, token,
+    password, prompt or Supabase error;
+  - the only application log sites are the fixed `[Supabase] …` and
+    `[ActivityWebApp] … (failure kind)` messages.
 
 ## 13. Files
 
