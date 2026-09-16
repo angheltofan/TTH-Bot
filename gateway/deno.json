@@ -1,0 +1,19 @@
+{
+  "tasks": {
+    "test": "deno test --allow-read=.,../lib,../firmware tests/",
+    "generate": "deno run --allow-read=../lib --allow-write=src/generated scripts/generate_base_prompt.ts",
+    "check": "deno check main.ts",
+    "start": "deno run --allow-net --allow-env main.ts",
+    "start:lan": "deno run --allow-net --allow-env --allow-read=.dev-certs --env-file=.env main.ts",
+    "probe:barge-in": "deno run --allow-net --allow-env manual/barge_in_probe.ts",
+    "probe:barge-in-live": "deno run --allow-net --allow-env --allow-read --allow-write=manual manual/barge_in_live_probe.ts"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "lint": {
+    "rules": { "tags": ["recommended"] }
+  }
+}
