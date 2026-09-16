@@ -82,8 +82,11 @@ bool printStartupReport(const char* pttInputName) {
                 static_cast<unsigned>(TTH_PTT_DEBOUNCE_MS));
   Serial.printf("max hold     : %u ms\r\n",
                 static_cast<unsigned>(TTH_PTT_MAX_HOLD_MS));
-  Serial.printf("vibration    : %u ms @ level %u\r\n",
-                static_cast<unsigned>(TTH_VIBRATION_MS),
+  Serial.printf("vibration    : refused action only, %u/%u/%u ms @ level %u "
+                "(none when speaking)\r\n",
+                static_cast<unsigned>(TTH_DENIED_PULSE_MS),
+                static_cast<unsigned>(TTH_DENIED_GAP_MS),
+                static_cast<unsigned>(TTH_DENIED_PULSE_MS),
                 static_cast<unsigned>(TTH_VIBRATION_LEVEL));
   Serial.printf("turn buffer  : %lu bytes PSRAM (%u s at %u Hz)\r\n",
                 static_cast<unsigned long>(TTH_TURN_BUFFER_BYTES),

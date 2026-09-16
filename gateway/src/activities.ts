@@ -10,7 +10,19 @@
 // A free_conversation activity runs as push-to-talk on the Core2 (strictly
 // half duplex) and the conversion is reported so it can be logged.
 
+import { checkActivity, LIMITS } from "./limits.ts";
+import { composeSystemInstruction } from "./prompt.ts";
+import { safeActivityTitle } from "./protocol.ts";
+
 export type InteractionMode = "push_to_talk" | "free_conversation";
+
+// What the device may know about an activity: never the prompt or the
+// participants.
+export interface ActivitySummary {
+  id: string;
+  title: string;
+  mode: InteractionMode;
+}
 
 export interface Activity {
   id: string;
@@ -125,6 +137,21 @@ export async function fetchActivityById(
 function byOrder(a: Activity, b: Activity): number {
   if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
   return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+}
+
+// Whether an activity can run at all: enabled, within the prompt and
+// participant limits, and its composed instruction within the limit.
+export function isUsableActivity(activity: Activity): boolean {
+  return activity.enabled && checkActivity(activity).length === 0 &&
+    composeSystemInstruction(activity).length <= LIMITS.maxSystemInstructionChars;
+}
+
+// The on-device menu: usable activities in display order, at most
+// LIMITS.maxSelectableActivities, as id + safe title + mode only.
+export function selectableActivities(activities: readonly Activity[]): ActivitySummary[] {
+  return activities.filter(isUsableActivity).slice().sort(byOrder)
+    .slice(0, LIMITS.maxSelectableActivities)
+    .map((a) => ({ id: a.id, title: safeActivityTitle(a.title), mode: a.interactionMode }));
 }
 
 export function resolveActivity(

@@ -51,9 +51,9 @@
 
 // --- Haptics ---------------------------------------------------------------
 
-// A short pulse when AI speech begins. Driven by a deadline checked in the
-// main loop — never by delay() — so it cannot stall audio or rendering.
-#define TTH_VIBRATION_MS 120
+// The motor is used ONLY for the refused-action pattern (TTH_DENIED_*
+// below). The earlier 120 ms pulse when speech began was removed by product
+// decision: the robot does not vibrate when it starts speaking.
 
 // AXP192 LDO3 drive level for the Core2's vibration motor, via
 // M5.Power.setVibration(). Firm enough to feel through an enclosure without
@@ -304,7 +304,7 @@
 // credential: the URL, device id, token and CA are provisioned into NVS.
 
 // hello.fw and the User-Agent ([A-Za-z0-9._-], at most 24 characters).
-#define TTH_FIRMWARE_VERSION "core2-6.3"
+#define TTH_FIRMWARE_VERSION "core2-6.4"
 
 // hello.credit: the downstream ring's PCM capacity (PHASE6_PLAN §3.3), 4 s of
 // 24 kHz speech.
@@ -408,6 +408,18 @@
 // rest state for the link (Ready, or Sleeping while offline). A press retries
 // at once.
 #define TTH_TURN_ERROR_HOLD_MS 3000u
+
+// --- On-device activity selection -----------------------------------------------
+//
+// Left touch zone: open the menu (only online and idle in READY) / previous.
+// Right zone: next. Centre zone: confirm; while the menu is shown it never
+// starts push-to-talk. Only ids and bounded titles reach the device; the
+// selected id is saved in NVS and sent in hello after a reboot.
+#define TTH_ACTIVITY_MENU_TIMEOUT_MS 10000u
+// The gateway opens a new Gemini session before confirming; its own setup
+// timeout is 15 s.
+#define TTH_ACTIVITY_SELECT_TIMEOUT_MS 30000u
+#define TTH_ACTIVITY_FAIL_DISPLAY_MS 2000u
 
 #if TTH_GW_PROACTIVE_RECONNECT_MS >= TTH_GW_TURN_GUARD_MS || TTH_GW_TURN_GUARD_MS >= 3600000u
 #error "the proactive reconnect must precede the turn guard, and both must precede 60 min"

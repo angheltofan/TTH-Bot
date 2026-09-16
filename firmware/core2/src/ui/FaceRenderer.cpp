@@ -155,6 +155,63 @@ void FaceRenderer::invalidateAll() {
   _lowerDirty = true;
 }
 
+void FaceRenderer::drawActivityMenu(const char* position, const char* title,
+                                    const char* bottom, bool bottomIsHint) {
+  const int w = M5.Display.width();
+  const int h = M5.Display.height();
+  M5.Display.startWrite();
+  M5.Display.fillScreen(_colorBackground);
+  M5.Display.setTextDatum(textdatum_t::middle_center);
+  M5.Display.setTextColor(_colorDim, _colorBackground);
+  M5.Display.setFont(&fonts::Font4);
+  M5.Display.drawString(position, w / 2, 30);
+
+  // The title: one line of Font4 if it fits; otherwise split at a space into
+  // two lines; otherwise the smaller Font2.
+  M5.Display.setTextColor(_colorPrimary, _colorBackground);
+  const int maxWidth = w - 16;
+  if (M5.Display.textWidth(title) <= maxWidth) {
+    M5.Display.drawString(title, w / 2, h / 2 - 10);
+  } else {
+    char first[64];
+    char second[64];
+    const size_t length = strlen(title);
+    size_t split = 0;
+    for (size_t i = 0; i < length && i < sizeof(first) - 1; ++i) {
+      if (title[i] == ' ' && i <= length / 2 + 4) split = i;
+    }
+    if (split == 0) split = length / 2;
+    snprintf(first, sizeof(first), "%.*s", static_cast<int>(split), title);
+    snprintf(second, sizeof(second), "%s", title + split + (title[split] == ' ' ? 1 : 0));
+    if (M5.Display.textWidth(first) > maxWidth || M5.Display.textWidth(second) > maxWidth) {
+      M5.Display.setFont(&fonts::Font2);
+    }
+    M5.Display.drawString(first, w / 2, h / 2 - 26);
+    M5.Display.drawString(second, w / 2, h / 2 + 6);
+  }
+
+  // Bottom line: arrows and OK above the three touch zones, or a status.
+  M5.Display.setFont(&fonts::Font4);
+  if (bottomIsHint) {
+    M5.Display.setTextColor(_colorDim, _colorBackground);
+    M5.Display.drawString("<", w / 6, h - 22);
+    M5.Display.drawString("OK", w / 2, h - 22);
+    M5.Display.drawString(">", (5 * w) / 6, h - 22);
+  } else {
+    M5.Display.setTextColor(_colorPrimary, _colorBackground);
+    M5.Display.setFont(&fonts::Font2);
+    M5.Display.drawString(bottom, w / 2, h - 22);
+  }
+  M5.Display.endWrite();
+}
+
+void FaceRenderer::restoreAfterMenu() {
+  M5.Display.startWrite();
+  M5.Display.fillScreen(_colorBackground);
+  M5.Display.endWrite();
+  invalidateAll();
+}
+
 bool FaceRenderer::eyeParamsChanged(const FaceFrame& frame) const {
   return differs(frame.eyeScale, _renderedEyes.eyeScale) ||
          differs(frame.eyeOpenness, _renderedEyes.eyeOpenness) ||

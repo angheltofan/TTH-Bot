@@ -10,8 +10,10 @@
 
 namespace tth {
 
-// Draws the robot face: two eyes and one mouth on a dark ground. Nothing else
-// -- no text, icons, status labels, borders or menus ever reach the display.
+// Draws the robot face: two eyes and one mouth on a dark ground. The only
+// other thing that ever reaches the display is the activity menu
+// (drawActivityMenu), shown full screen while the child chooses an activity;
+// restoreAfterMenu() puts the face back exactly.
 //
 // TWO SPRITES, NOT A FRAMEBUFFER
 //
@@ -54,6 +56,13 @@ class FaceRenderer {
   void render(const FaceFrame& frame, bool atomic);
 
   void invalidateAll();
+
+  // The activity menu, full screen: position ("2/4"), a title already reduced
+  // to ASCII, and a bottom line (the touch-zone hint or a status).
+  void drawActivityMenu(const char* position, const char* title, const char* bottom,
+                        bool bottomIsHint);
+  // Clears the menu and forces both face regions to be pushed again.
+  void restoreAfterMenu();
 
   bool spritesAllocated() const { return _ready; }
 

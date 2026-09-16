@@ -385,6 +385,13 @@ void GatewaySession::onControl(const wire::ControlMessage& message, uint32_t now
       // never change the session.
       return;
 
+    case wire::ControlType::ActivityList:
+    case wire::ControlType::ActivitySelected:
+    case wire::ControlType::ActivitySelectError:
+      // Activity selection: the application's selector acts on them. They
+      // never change the session.
+      return;
+
     case wire::ControlType::Unknown:
       ++_unknownMessages;
       return;

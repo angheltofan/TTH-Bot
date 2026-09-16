@@ -185,7 +185,13 @@ App::App()
       _turnSource(&_gatewayTurn),
       _reportedZeroStalls(0),
       _lastZeroStallReportMs(0),
-      _startFailureTransient(false) {}
+      _startFailureTransient(false),
+      _activitySelector(TTH_ACTIVITY_MENU_TIMEOUT_MS, TTH_ACTIVITY_SELECT_TIMEOUT_MS,
+                        TTH_ACTIVITY_FAIL_DISPLAY_MS),
+      _activityPreference(_nvs),
+      _activityMenuDirty(false) {
+  _savedActivity[0] = '\0';
+}
 
 void App::begin() {
   // Before M5.begin() starts the UART: provisioning lines need more than the
@@ -309,6 +315,13 @@ void App::begin() {
       Serial.println(F("[config] *** CA buffers unavailable: gateway disabled ***"));
     }
     reportTrustAnchor("stored", _trustStore, &_certificateCheck, boot);
+
+    // The saved on-device activity selection (an id only), sent in hello.
+    if (_activityPreference.load(_savedActivity, sizeof(_savedActivity))) {
+      Serial.printf("[activity] saved selection: %s\r\n", _savedActivity);
+    } else {
+      Serial.println(F("[activity] saved selection: none (the gateway's configured activity)"));
+    }
   }
   _wifi.begin();
   _wifi.apply(_configStore.hasConfig() ? &_configStore.active() : nullptr,
@@ -433,6 +446,9 @@ void App::tick() {
   // connectivity.
   serviceNetwork(nowMs);
   checkLowWater("network service", nowMs);
+  // The activity menu reads the touch zones before push-to-talk does, so a
+  // centre press while the menu is shown is the menu's and never a capture.
+  serviceActivityMenu(nowMs);
   servicePushToTalk(nowMs);
   // Capture first, so the streamer sees this iteration's committed audio.
   serviceCapture(nowMs);
@@ -493,6 +509,14 @@ void App::tick() {
 }
 
 void App::servicePushToTalk(uint32_t nowMs) {
+  if (_activitySelector.isOpen()) {
+    // The centre zone belongs to the menu: push-to-talk edges are swallowed,
+    // so no capture can start while it is shown (or while a selection is
+    // pending).
+    if (_ptt.consumePress()) _log.printf("[ptt] press ignored: activity menu open");
+    _ptt.consumeRelease();
+    return;
+  }
   if (_ptt.consumePress()) {
     _log.printf("[ptt] PRESS");
     _lastHoldTickMs = nowMs;
@@ -1064,17 +1088,12 @@ void App::servicePlayback(uint32_t nowMs) {
     _player.service(nowMs);
   }
 
-  // Fired from what the SPEAKER accepted, not from the SpeechStart event: the
-  // pulse lines up with the first sound, and a stream that never gets audio
-  // to the speaker never vibrates.
+  // Measured from what the SPEAKER accepted, not from the SpeechStart event.
+  // (No vibration here: the robot does not buzz when it starts speaking.)
   if (_player.consumeFirstAudio()) {
     _log.printf("[play] first audio accepted by speaker %lu ms after speech "
                 "start",
                 static_cast<unsigned long>(nowMs - _speechStartMs));
-    if (_haptics.pulse(nowMs)) {
-      _log.printf("[haptics] vibrate %u ms (first audio)",
-                  static_cast<unsigned>(TTH_VIBRATION_MS));
-    }
     if (usingGateway()) logMemoryPoint("playback");
   }
 
@@ -1438,6 +1457,15 @@ void App::handleDiagnosticKey(char key, uint32_t nowMs) {
 }
 
 void App::serviceFace(uint32_t nowMs) {
+  if (_activitySelector.isOpen()) {
+    // The menu owns the display; the face is restored when it closes.
+    if (_activityMenuDirty) {
+      _activityMenuDirty = false;
+      TTH_TIME_BLOCK("activity menu render");
+      drawActivityMenu();
+    }
+    return;
+  }
   const FaceState productionFace = faceStateFor(_machine.state());
   const FaceState face = _faceOverride.faceFor(productionFace, nowMs);
 
@@ -1661,7 +1689,19 @@ void App::handleGatewayEvent(uint32_t nowMs) {
           handleTurnControl(nowMs);
           break;
         case wire::ControlType::Ready:
+          // The activity the gateway is actually using for this session.
+          _activityCatalog.setCurrent(_controlMessage.activity);
+          break;
         case wire::ControlType::Pong:
+          break;
+        case wire::ControlType::ActivityList:
+          handleActivityList();
+          break;
+        case wire::ControlType::ActivitySelected:
+          handleActivitySelected(nowMs);
+          break;
+        case wire::ControlType::ActivitySelectError:
+          handleActivitySelectError(nowMs);
           break;
       }
       _session.onControl(_controlMessage, nowMs);
@@ -1714,6 +1754,9 @@ void App::executeSessionAction(SessionAction action, uint32_t nowMs) {
       // BEFORE the command, while nothing is being written: the ring is
       // emptied and the credit epoch restarted for this connection.
       _gatewayTurn.onConnecting(_gatewayGeneration, nowMs);
+      // A new connection sends a fresh list; a menu from the old one closes.
+      _activityCatalog.reset();
+      if (_activitySelector.isOpen()) handleSelectorEvent(_activitySelector.cancel(), nowMs);
       config::GatewayUrlParts parts;
       memset(&parts, 0, sizeof(parts));
       if (_configStore.hasConfig()) {
@@ -1731,12 +1774,13 @@ void App::executeSessionAction(SessionAction action, uint32_t nowMs) {
 
     case SessionAction::SendHello: {
       const size_t n = wire::encodeHello(text, sizeof(text), TTH_FIRMWARE_VERSION,
-                                         TTH_GW_INITIAL_CREDIT);
+                                         TTH_GW_INITIAL_CREDIT, _savedActivity);
       if (n == 0 || !_gateway.sendText(text, n)) {
         _log.printf("[gw] *** hello could not be queued ***");
       } else {
-        _log.printf("[gw] hello sent (proto 1, fw %s, credit %lu B)", TTH_FIRMWARE_VERSION,
-                    static_cast<unsigned long>(TTH_GW_INITIAL_CREDIT));
+        _log.printf("[gw] hello sent (proto 1, fw %s, credit %lu B, activity %s)",
+                    TTH_FIRMWARE_VERSION, static_cast<unsigned long>(TTH_GW_INITIAL_CREDIT),
+                    _savedActivity[0] != '\0' ? _savedActivity : "gateway default");
       }
       return;
     }
@@ -1999,7 +2043,7 @@ void App::serviceHeartbeat(uint32_t nowMs) {
     char line[kLogMessageMax];
     snprintf(line, sizeof(line),
              "[pb] player=%s queued=%lu played=%lu underruns=%lu rejects=%lu "
-             "guard=%lu/%lu maxLoopSpeaking=%luus haptics=%lu | source=%s "
+             "guard=%lu/%lu maxLoopSpeaking=%luus hapticsRefused=%lu | source=%s "
              "evDrop=%lu stale=%lu | barges=%lu",
              toString(_player.state()), static_cast<unsigned long>(p.queued),
              static_cast<unsigned long>(p.played),
@@ -2008,7 +2052,7 @@ void App::serviceHeartbeat(uint32_t nowMs) {
              static_cast<unsigned long>(_speakerOutput.busyRefusals()),
              static_cast<unsigned long>(_speakerOutput.notRunningRefusals()),
              static_cast<unsigned long>(_maxLoopSpeakingMicros),
-             static_cast<unsigned long>(_haptics.pulses()),
+             static_cast<unsigned long>(_haptics.deniedCount()),
              sourceName(), static_cast<unsigned long>(eventDrops),
              static_cast<unsigned long>(staleDiscards),
              static_cast<unsigned long>(_bargeIn.count()));
@@ -2043,6 +2087,12 @@ void App::serviceHeartbeat(uint32_t nowMs) {
     } else {
       queueCreditLine(static_cast<uint8_t>(_heartbeatStage - 8));
     }
+    ++_heartbeatStage;
+    return;
+  }
+
+  if (_heartbeatStage == 10) {
+    queueActivityLine();
     ++_heartbeatStage;
     return;
   }
@@ -2231,6 +2281,216 @@ void App::queueCreditLine(uint8_t part) {
              static_cast<unsigned long>(g.downFrames),
              static_cast<unsigned long>(g.badFrames));
   }
+  _log.queue().push(line);
+}
+
+// --- on-device activity selection ------------------------------------------------------
+
+ActivityMenuConditions App::activityMenuConditions() const {
+  ActivityMenuConditions c;
+  c.online = _connectivity == Connectivity::Online;
+  c.sessionReady = _session.state() == SessionState::Ready;
+  c.conversationReady = _machine.state() == ConversationState::Ready;
+  c.audioIdle = _player.isIdle() && !_capture.isBusy();
+  c.turnIdle = !_streamer.isActive() && _gatewayTurn.phase() == GatewayTurnSource::Phase::Idle;
+  c.bargeInIdle = !_bargeIn.isActive();
+  c.catalogReady = _activityCatalog.count() > 0;
+  c.usingGateway = usingGateway();
+  return c;
+}
+
+void App::serviceActivityMenu(uint32_t nowMs) {
+  // Short presses ("clicks") of the three touch zones below the display.
+  const bool left = M5.BtnA.wasClicked();
+  const bool right = M5.BtnC.wasClicked();
+  const bool centre = M5.BtnB.wasClicked();
+  const ActivityMenuConditions conditions = activityMenuConditions();
+  SelectorEvent event = SelectorEvent::None;
+
+  if (!_activitySelector.isOpen()) {
+    if (!left) return;
+    const char* refusal = activityMenuRefusal(conditions);
+    if (refusal != nullptr) {
+      _log.printf("[activity] menu refused: %s", refusal);
+      if (_haptics.denied(nowMs)) _log.printf("[haptics] refused pattern (2 short pulses)");
+      return;
+    }
+    event = _activitySelector.open(_activityCatalog, nowMs);
+  } else {
+    const bool linkLost = !conditions.online || !conditions.sessionReady;
+    if (linkLost || (_activitySelector.state() == SelectorState::Browsing &&
+                     activityMenuRefusal(conditions) != nullptr)) {
+      // A pending selection is abandoned too: the saved selection is only
+      // changed when the gateway confirms, so the previous one stays.
+      event = _activitySelector.cancel();
+    } else if (left) {
+      event = _activitySelector.previous(_activityCatalog, nowMs);
+    } else if (right) {
+      event = _activitySelector.next(_activityCatalog, nowMs);
+    } else if (centre) {
+      event = _activitySelector.confirm(_activityCatalog, nowMs);
+    }
+  }
+  if (event == SelectorEvent::None) event = _activitySelector.tick(nowMs);
+  handleSelectorEvent(event, nowMs);
+}
+
+void App::handleSelectorEvent(SelectorEvent event, uint32_t nowMs) {
+  switch (event) {
+    case SelectorEvent::None:
+      return;
+
+    case SelectorEvent::Opened:
+    case SelectorEvent::Moved:
+      markTransitionIteration();
+      _log.printf("[activity] menu %s %lu/%lu", event == SelectorEvent::Opened ? "open" : "at",
+                  static_cast<unsigned long>(_activitySelector.highlight() + 1),
+                  static_cast<unsigned long>(_activityCatalog.count()));
+      _activityMenuDirty = true;
+      return;
+
+    case SelectorEvent::SelectRequested: {
+      markTransitionIteration();
+      char text[wire::kMaxControlBytes + 1];
+      const size_t n = wire::encodeActivitySelect(text, sizeof(text), _activitySelector.pendingId());
+      if (n == 0 || !_gateway.sendText(text, n)) {
+        _log.printf("[activity] select could not be queued");
+        handleSelectorEvent(_activitySelector.onError(nowMs), nowMs);
+        return;
+      }
+      _log.printf("[activity] select %s sent; waiting for the gateway", _activitySelector.pendingId());
+      _activityMenuDirty = true;
+      return;
+    }
+
+    case SelectorEvent::Failed:
+      markTransitionIteration();
+      _log.printf("[activity] selection failed: the previous activity stays in use");
+      _activityMenuDirty = true;
+      return;
+
+    case SelectorEvent::Unchanged:
+      _log.printf("[activity] menu closed: kept the current activity");
+      closeActivityMenu();
+      return;
+    case SelectorEvent::Selected:
+      closeActivityMenu();
+      return;
+    case SelectorEvent::TimedOut:
+      _log.printf("[activity] menu closed: no input for %lu s",
+                  static_cast<unsigned long>(TTH_ACTIVITY_MENU_TIMEOUT_MS / 1000u));
+      closeActivityMenu();
+      return;
+    case SelectorEvent::Dismissed:
+      closeActivityMenu();
+      return;
+    case SelectorEvent::Cancelled:
+      _log.printf("[activity] menu closed: robot no longer idle or online");
+      closeActivityMenu();
+      return;
+  }
+}
+
+void App::closeActivityMenu() {
+  markTransitionIteration();
+  _activityMenuDirty = false;
+  {
+    TTH_TIME_BLOCK("activity menu close");
+    _faceRenderer.restoreAfterMenu();
+  }
+  // The next face frame pushes every region together.
+  _faceTransitionPending = true;
+}
+
+void App::drawActivityMenu() {
+  const uint32_t count = _activityCatalog.count();
+  const uint32_t index = _activitySelector.highlight();
+  if (count == 0 || index >= count) return;
+  char position[16];
+  snprintf(position, sizeof(position), "%lu/%lu", static_cast<unsigned long>(index + 1),
+           static_cast<unsigned long>(count));
+  char title[wire::kMaxActivityTitleBytes + 1];
+  toDisplayAscii(_activityCatalog.at(index).title, title, sizeof(title));
+  switch (_activitySelector.state()) {
+    case SelectorState::Pending:
+      _faceRenderer.drawActivityMenu(position, title, "Schimb activitatea...", false);
+      return;
+    case SelectorState::Failed:
+      _faceRenderer.drawActivityMenu(position, title, "Nu s-a putut schimba", false);
+      return;
+    case SelectorState::Browsing:
+    case SelectorState::Closed:
+      _faceRenderer.drawActivityMenu(position, title, "", true);
+      return;
+  }
+}
+
+void App::handleActivityList() {
+  const ActivityCatalog::Accept result = _activityCatalog.accept(_controlMessage);
+  if (result == ActivityCatalog::Accept::Complete) {
+    _log.printf("[activity] list: %lu activities, current %ld",
+                static_cast<unsigned long>(_activityCatalog.count()),
+                static_cast<long>(_activityCatalog.indexOf(_activityCatalog.current()) + 1));
+  } else if (result == ActivityCatalog::Accept::Rejected) {
+    _log.printf("[activity] list item out of order: list discarded (errors %lu)",
+                static_cast<unsigned long>(_activityCatalog.listErrors()));
+  }
+}
+
+void App::handleActivitySelected(uint32_t nowMs) {
+  const char* id = _controlMessage.activity;
+  _activityCatalog.setCurrent(id);
+  const SelectorEvent event = _activitySelector.onSelected(id, nowMs);
+  if (event != SelectorEvent::Selected) {
+    _log.printf("[activity] gateway now uses %s", id);
+    return;
+  }
+  // Saved only now that the gateway has switched: a failed selection never
+  // replaces the previous one.
+  if (_activityPreference.save(id)) {
+    memcpy(_savedActivity, id, sizeof(_savedActivity) - 1);
+    _savedActivity[sizeof(_savedActivity) - 1] = '\0';
+    _log.printf("[activity] selected %s (saved)", id);
+  } else {
+    _log.printf("[activity] selected %s (NOT saved: NVS write failed)", id);
+  }
+  handleSelectorEvent(event, nowMs);
+}
+
+void App::handleActivitySelectError(uint32_t nowMs) {
+  const wire::ControlMessage& m = _controlMessage;
+  _log.printf("[activity] gateway refused %s: %.31s",
+              m.activity[0] != '\0' ? m.activity : "the selection", m.code);
+  if (_activitySelector.state() == SelectorState::Pending) {
+    handleSelectorEvent(_activitySelector.onError(nowMs), nowMs);
+    return;
+  }
+  // The saved selection sent in hello was refused. If it no longer exists or
+  // is not usable, forget it so the robot stops asking for it; a transient
+  // failure keeps it.
+  const bool gone = strcmp(m.code, "missing") == 0 || strcmp(m.code, "disabled") == 0 ||
+                    strcmp(m.code, "invalid") == 0;
+  if (gone && _savedActivity[0] != '\0' &&
+      (m.activity[0] == '\0' || strcmp(m.activity, _savedActivity) == 0)) {
+    _activityPreference.clear();
+    _savedActivity[0] = '\0';
+    _log.printf("[activity] saved selection cleared; using the gateway's configured activity");
+  }
+}
+
+void App::queueActivityLine() {
+  char line[kLogMessageMax];
+  snprintf(line, sizeof(line),
+           "[activity] current=%s saved=%s list=%lu selector=%s selected=%lu failed=%lu "
+           "timeouts=%lu listErrors=%lu",
+           _activityCatalog.current()[0] != '\0' ? _activityCatalog.current() : "-",
+           _savedActivity[0] != '\0' ? _savedActivity : "-",
+           static_cast<unsigned long>(_activityCatalog.count()),
+           toString(_activitySelector.state()),
+           static_cast<unsigned long>(_activitySelector.selections()),
+           static_cast<unsigned long>(_activitySelector.failures()),
+           static_cast<unsigned long>(_activitySelector.timeouts()),
+           static_cast<unsigned long>(_activityCatalog.listErrors()));
   _log.queue().push(line);
 }
 

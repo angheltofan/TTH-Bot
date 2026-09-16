@@ -5,6 +5,7 @@
 // so the C++ encoder and the TypeScript parser (and vice versa) are pinned to
 // one byte-exact format.
 
+#include <stdio.h>
 #include <string.h>
 
 #include <string>
@@ -279,6 +280,106 @@ static void an_oversized_control_frame_is_rejected() {
                    ControlError::TooLong);
 }
 
+// --- activity selection --------------------------------------------------------------
+
+static const char* const kActivityA = "a95ffc7e-1406-4a19-ac3b-6c27d8516b70";
+
+static void activity_messages_encode_byte_exactly() {
+  char out[513];
+  // Shared with gateway/tests/protocol_test.ts.
+  TEST_ASSERT_TRUE(tth::wire::encodeHello(out, sizeof(out), "core2-6.4", 192000, kActivityA) > 0);
+  TEST_ASSERT_EQUAL_STRING(
+      "{\"t\":\"hello\",\"proto\":1,\"fw\":\"core2-6.4\",\"in\":\"s16le/16000/1\","
+      "\"out\":\"s16le/24000/1\",\"maxDown\":1920,\"credit\":192000,"
+      "\"activity\":\"a95ffc7e-1406-4a19-ac3b-6c27d8516b70\"}",
+      out);
+  // No saved selection: exactly the previous hello.
+  TEST_ASSERT_TRUE(tth::wire::encodeHello(out, sizeof(out), "core2-6.4", 192000, "") > 0);
+  TEST_ASSERT_NULL(strstr(out, "activity"));
+  TEST_ASSERT_TRUE(tth::wire::encodeActivitySelect(out, sizeof(out), kActivityA) > 0);
+  TEST_ASSERT_EQUAL_STRING(
+      "{\"t\":\"activity_select\",\"activity\":\"a95ffc7e-1406-4a19-ac3b-6c27d8516b70\"}", out);
+  // Anything but a canonical id is refused.
+  TEST_ASSERT_EQUAL_UINT32(0, tth::wire::encodeActivitySelect(out, sizeof(out), "not-an-id"));
+  TEST_ASSERT_EQUAL_UINT32(
+      0, tth::wire::encodeActivitySelect(out, sizeof(out), "A95FFC7E-1406-4A19-AC3B-6C27D8516B70"));
+  TEST_ASSERT_EQUAL_UINT32(0, tth::wire::encodeHello(out, sizeof(out), "core2-6.4", 1, "x\"y"));
+  TEST_ASSERT_FALSE(tth::wire::isActivityId("a95ffc7e-1406-4a19-ac3b-6c27d8516b7"));
+  TEST_ASSERT_FALSE(tth::wire::isActivityId("a95ffc7e-1406-4a19-ac3b-6c27d8516b700"));
+  TEST_ASSERT_FALSE(tth::wire::isActivityId("a95ffc7e_1406-4a19-ac3b-6c27d8516b70"));
+  TEST_ASSERT_FALSE(tth::wire::isActivityId(nullptr));
+}
+
+static void activity_list_items_parse_with_their_bounds() {
+  ControlMessage m;
+  // Shared with gateway/tests/protocol_test.ts (UTF-8 title, no escapes).
+  const char* item =
+      "{\"t\":\"activity_list\",\"index\":1,\"count\":4,"
+      "\"activity\":\"a95ffc7e-1406-4a19-ac3b-6c27d8516b70\","
+      "\"title\":\"Conversa\xC8\x9Bie liber\xC4\x83\",\"mode\":\"free_conversation\",\"current\":true}";
+  TEST_ASSERT_TRUE(parse(item, m) == ControlError::None);
+  TEST_ASSERT_TRUE(m.type == ControlType::ActivityList);
+  TEST_ASSERT_EQUAL_UINT32(1, m.index);
+  TEST_ASSERT_EQUAL_UINT32(4, m.count);
+  TEST_ASSERT_TRUE(m.current);
+  TEST_ASSERT_EQUAL_STRING(kActivityA, m.activity);
+  TEST_ASSERT_EQUAL_STRING("Conversa\xC8\x9Bie liber\xC4\x83", m.title);
+  TEST_ASSERT_EQUAL_STRING("free_conversation", m.mode);
+
+  const auto variant = [](const char* index, const char* count, const char* id, const char* title,
+                          const char* mode) {
+    static char buffer[600];
+    snprintf(buffer, sizeof(buffer),
+             "{\"t\":\"activity_list\",\"index\":%s,\"count\":%s,\"activity\":\"%s\","
+             "\"title\":\"%s\",\"mode\":\"%s\",\"current\":false}",
+             index, count, id, title, mode);
+    return buffer;
+  };
+  const std::string title48(48, 'x');
+  const std::string title49(49, 'x');
+  TEST_ASSERT_TRUE(parse(variant("7", "8", kActivityA, title48.c_str(), "push_to_talk"), m) ==
+                   ControlError::None);
+  TEST_ASSERT_TRUE(parse(variant("0", "0", kActivityA, "T", "push_to_talk"), m) ==
+                   ControlError::BadValue);  // empty list
+  TEST_ASSERT_TRUE(parse(variant("0", "9", kActivityA, "T", "push_to_talk"), m) ==
+                   ControlError::BadValue);  // over 8
+  TEST_ASSERT_TRUE(parse(variant("4", "4", kActivityA, "T", "push_to_talk"), m) ==
+                   ControlError::BadValue);  // index out of range
+  TEST_ASSERT_TRUE(parse(variant("0", "1", "not-an-id", "T", "push_to_talk"), m) ==
+                   ControlError::BadValue);
+  TEST_ASSERT_TRUE(parse(variant("0", "1", kActivityA, "", "push_to_talk"), m) ==
+                   ControlError::BadValue);  // empty title
+  TEST_ASSERT_TRUE(parse(variant("0", "1", kActivityA, title49.c_str(), "push_to_talk"), m) ==
+                   ControlError::BadValue);  // title over 48 bytes
+  TEST_ASSERT_TRUE(parse(variant("0", "1", kActivityA, "T", "telepathy"), m) ==
+                   ControlError::BadValue);
+  TEST_ASSERT_TRUE(parse("{\"t\":\"activity_list\",\"index\":0,\"count\":1,"
+                         "\"activity\":\"a95ffc7e-1406-4a19-ac3b-6c27d8516b70\",\"title\":\"T\","
+                         "\"mode\":\"push_to_talk\"}",
+                         m) == ControlError::MissingField);  // no current
+}
+
+static void activity_selected_and_errors_parse() {
+  ControlMessage m;
+  TEST_ASSERT_TRUE(parse("{\"t\":\"activity_selected\",\"activity\":\"a95ffc7e-1406-4a19-ac3b-6c27d8516b70\"}",
+                         m) == ControlError::None);
+  TEST_ASSERT_TRUE(m.type == ControlType::ActivitySelected);
+  TEST_ASSERT_EQUAL_STRING(kActivityA, m.activity);
+  TEST_ASSERT_TRUE(parse("{\"t\":\"activity_selected\",\"activity\":\"a-1\"}", m) ==
+                   ControlError::BadValue);
+
+  TEST_ASSERT_TRUE(parse("{\"t\":\"activity_select_error\",\"code\":\"missing\","
+                         "\"activity\":\"a95ffc7e-1406-4a19-ac3b-6c27d8516b70\"}",
+                         m) == ControlError::None);
+  TEST_ASSERT_TRUE(m.type == ControlType::ActivitySelectError);
+  TEST_ASSERT_EQUAL_STRING("missing", m.code);
+  TEST_ASSERT_TRUE(parse("{\"t\":\"activity_select_error\",\"code\":\"busy\"}", m) ==
+                   ControlError::None);
+  TEST_ASSERT_TRUE(parse("{\"t\":\"activity_select_error\",\"code\":\"busy\",\"activity\":\"x\"}",
+                         m) == ControlError::BadValue);
+  TEST_ASSERT_TRUE(parse("{\"t\":\"activity_select_error\"}", m) == ControlError::MissingField);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(the_header_carries_a_uint32_little_endian_turn);
@@ -294,5 +395,8 @@ int main(int, char**) {
   RUN_TEST(malformed_messages_are_rejected);
   RUN_TEST(missing_or_wrong_fields_are_rejected);
   RUN_TEST(an_oversized_control_frame_is_rejected);
+  RUN_TEST(activity_messages_encode_byte_exactly);
+  RUN_TEST(activity_list_items_parse_with_their_bounds);
+  RUN_TEST(activity_selected_and_errors_parse);
   return UNITY_END();
 }

@@ -1044,6 +1044,88 @@ converted free-conversation → push-to-talk).**
   assertion, activity or base-prompt text (162 prompt fragments checked),
   title or participant name.
 
+### 12.2 Product change: on-device activity selection (V6A paused)
+
+Requirements changed after V5: the activity is chosen on the Core2; the
+former management website (`tth-bot.vercel.app`) is gone, so
+`restrict_activity_writes` stays unapplied until an authenticated management
+path exists. V6A (hosting) is paused.
+
+- **Protocol (tth.v1, flat JSON ≤ 512 B):** gateway → device
+  `activity_list` (one item per message: `index`, `count` ≤ 8, `activity`
+  UUID, `title` ≤ 48 UTF-8 bytes without escapes, `mode`, `current`),
+  `activity_selected {activity}`, `activity_select_error {code, activity?}`;
+  device → gateway `activity_select {activity}` and an optional `activity` in
+  `hello` (older gateways and devices ignore unknown fields/messages).
+- **Gateway:** the list is the usable enabled activities (same limits as a
+  session), sent after `ready`. A selection is refused while a turn, a fence
+  or another switch is active; otherwise a fresh by-id snapshot is loaded with
+  the publishable key; only if it is usable is the Gemini session closed and a
+  new one opened with it; `activity_selected` follows its `setup_complete`.
+  Turns are refused (`busy`) during the switch; a Gemini failure restores the
+  previous snapshot (`gemini_unavailable`). A superseded Gemini open is
+  discarded (generation counter). Logs: event names, device id, activity UUID,
+  codes and counts only.
+- **Firmware:** portable `ActivityCatalog` (bounded, preallocated; the last
+  complete list stays in use), `ActivitySelector` (Closed / Browsing / Pending
+  / Failed; 10 s idle, 30 s pending, 2 s failure display), the menu gate, and
+  `ActivityPreference` (NVS key `act`, the 36-character id only). The centre
+  touch zone never starts capture while the menu is open.
+- **Display:** M5GFX's only Unicode fonts are the multi-megabyte CJK sets, so
+  titles are shown transliterated to ASCII; a Romanian VLW subset font is a
+  post-v1 option.
+
+- **Haptics (same firmware):** the 120 ms vibration at the first played audio
+  is removed; the motor is used only for the two-pulse refused-action pattern
+  (`hapticsRefused` in the `[pb]` heartbeat).
+
+**Physical result (2026-09-16): PASSED**, confirmed by the product owner on
+the Core2 — menu from READY, navigation, centre confirm without capture,
+switch to a different activity, Gemini answering according to it, persistence
+across a reboot, no vibration at playback start, two pulses when the menu is
+refused while busy, no reboot or regression. Evidence is recorded honestly:
+
+| Item | Evidence |
+|---|---|
+| capture `failed=0 dropped=0`, playback `rejects=0 refusals=0`, `creditViolations=0`, `tlsAllocFail=0` | retained logs |
+| centre press swallowed while the menu is open | retained logs |
+| menu selection saved (`select … sent` → `selected … (saved)`) | retained robot log, on the build before the haptics change |
+| saved id sent in `hello`, READY reports it | retained robot log (the id equalled the configured default) |
+| no vibration at playback start | retained robot log, current build |
+| no prompt, title, participant or credential in logs | mechanical scan of all retained logs |
+| gateway switch ordering, non-default restore after reboot | product owner (physical) + automated tests; **not** in a retained log — the gateway log of that run was overwritten |
+| two-pulse vibration when refused while busy | product owner (physical) + automated tests; not in a retained log |
+
+### 12.4 Production-observation list
+
+Kept unchanged for v1, watched in production:
+
+- **First-response timeout (10 s).** In the selector test one real-Gemini
+  turn got no response within 10 s; the turn failed once, ERROR showed, and
+  the following turns were normal — a recovered transient, not a selector
+  failure. Record how often `firstResponseTimeouts` rises in production before
+  changing the threshold.
+- **Playback underruns** (known, §11.2): 0–2 per answer observed; the startup
+  prebuffer stays post-v1.
+
+### 12.3 The former management website (read-only findings)
+
+- The management UI is the Flutter web build of this repository
+  (`lib/main.dart` → `ActivityWebApp` when `kIsWeb`), writing `activities` as
+  the anonymous role with the publishable key.
+- It was never deployed from Git: no `vercel.json`, workflow or deploy script
+  exists in any commit. The only trace is an untracked
+  `build/web/.vercel/project.json` (created 2026-08-14) linking the ignored
+  build folder to a Vercel project named `web` — a manual `vercel` CLI deploy.
+- `https://tth-bot.vercel.app` answers `404`, `X-Vercel-Error:
+  DEPLOYMENT_NOT_FOUND`: the hostname still resolves at Vercel but no
+  deployment is attached. Most likely the project or its deployments were
+  removed or the alias detached (unverifiable without the Vercel account).
+- It can be rebuilt from the current source (`flutter build web --release`,
+  no dart-defines, no SPA rewrites needed) — but a restored site would let
+  anyone edit robot prompts until editor sign-in exists and
+  `restrict_activity_writes` is applied. Not deployed.
+
 ## 13. Files
 
 **New:** `gateway/` (Deno service, tests, `scripts/generate_base_prompt.ts`,

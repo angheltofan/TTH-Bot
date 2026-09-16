@@ -7,10 +7,14 @@
 //                       X-TTH-Device: <device id>
 
 import {
+  Activity,
+  ActivitySummary,
   fetchActivityById,
   fetchEnabledActivities,
   ResolvedActivity,
   resolveActivity,
+  selectableActivities,
+  UUID_RE,
 } from "./activities.ts";
 import {
   DEV_ACTIVITY,
@@ -29,7 +33,7 @@ import { composeSystemInstruction } from "./prompt.ts";
 import { SUBPROTOCOL } from "./protocol.ts";
 import { FailureBlocker, TokenBucket } from "./rate_limit.ts";
 import { authenticate, DeviceRecord, parseRegistry, Registry } from "./registry.ts";
-import { DeviceSession } from "./session.ts";
+import { ActivityLoad, DeviceSession } from "./session.ts";
 import { mintGeminiToken } from "./token_client.ts";
 
 export interface GatewayConfig {
@@ -194,6 +198,48 @@ export function createHandler(deps: ServerDeps) {
     return resolveActivity(list, null) ?? "missing";
   };
 
+  // On-device selection: the same fresh, bounded, publishable-key load as a
+  // configured activity, and the same limits, for any id the device picks.
+  const snapshotOf = (activity: Activity): ActivityLoad => {
+    if (!activity.enabled) return { ok: false, code: "disabled" };
+    const systemInstruction = composeSystemInstruction(activity);
+    if (
+      checkActivity(activity).length > 0 ||
+      systemInstruction.length > LIMITS.maxSystemInstructionChars
+    ) {
+      return { ok: false, code: "invalid" };
+    }
+    return {
+      ok: true,
+      resolved: {
+        activity,
+        convertedFromFreeConversation: activity.interactionMode === "free_conversation",
+      },
+      systemInstruction,
+    };
+  };
+  const loadActivity = async (id: string): Promise<ActivityLoad> => {
+    if (!UUID_RE.test(id)) return { ok: false, code: "invalid" };
+    let activity: Activity | null;
+    if (config.geminiMode === "fake" && config.supabaseUrl === "") {
+      activity = DEV_ACTIVITY.id === id ? DEV_ACTIVITY : null;
+    } else {
+      try {
+        activity = await fetchActivityById(deps.fetchFn, config.supabaseUrl, config.publishableKey, id);
+      } catch {
+        return { ok: false, code: "unavailable" };
+      }
+    }
+    if (activity === null) return { ok: false, code: "missing" };
+    return snapshotOf(activity);
+  };
+  const listActivities = async (): Promise<ActivitySummary[]> =>
+    selectableActivities(
+      config.geminiMode === "fake" && config.supabaseUrl === ""
+        ? [DEV_ACTIVITY]
+        : await fetchEnabledActivities(deps.fetchFn, config.supabaseUrl, config.publishableKey),
+    );
+
   const plain = (status: number, body: string) =>
     new Response(body, { status, headers: { "content-type": "text/plain" } });
 
@@ -300,6 +346,8 @@ export function createHandler(deps: ServerDeps) {
       log,
       allowTurn: (t) => turnBuckets.take(device.id, t),
       testControls,
+      loadActivity,
+      listActivities,
     });
 
     socket.onopen = () => {

@@ -17,6 +17,7 @@
 #include "tth/GatewayTurnSource.h"
 #include "tth/LowWaterTracker.h"
 #include "tth/TrustAnchor.h"
+#include "tth/ActivitySelector.h"
 #include "tth/AppState.h"
 #include "tth/AudioBus.h"
 #include "tth/AudioFormat.h"
@@ -135,6 +136,17 @@ class App : private IBargeInOps {
   static bool isTransient(TurnError error);
   const char* sourceName() const;
   bool usingGateway() const;
+
+  // --- On-device activity selection -------------------------------------------
+  void serviceActivityMenu(uint32_t nowMs);
+  void handleSelectorEvent(SelectorEvent event, uint32_t nowMs);
+  ActivityMenuConditions activityMenuConditions() const;
+  void drawActivityMenu();
+  void closeActivityMenu();
+  void handleActivityList();
+  void handleActivitySelected(uint32_t nowMs);
+  void handleActivitySelectError(uint32_t nowMs);
+  void queueActivityLine();
 
   // --- IBargeInOps: the steps BargeIn sequences, in its order -------------
   void stopAcceptingPlayback() override;
@@ -269,6 +281,15 @@ class App : private IBargeInOps {
   uint32_t _lastZeroStallReportMs;
   // The last startCaptureTurn() failure was the gateway refusing the turn.
   bool _startFailureTransient;
+
+  // --- On-device activity selection --------------------------------------------
+  // Metadata only (ids, bounded titles, modes): never a prompt.
+  ActivityCatalog _activityCatalog;
+  ActivitySelector _activitySelector;
+  ActivityPreference _activityPreference;
+  // The saved selection, sent in hello; "" = the gateway's configured default.
+  char _savedActivity[wire::kActivityIdChars + 1];
+  bool _activityMenuDirty;
 };
 
 }  // namespace tth

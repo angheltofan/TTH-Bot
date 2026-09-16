@@ -170,8 +170,9 @@ function lastEvent(g: ReturnType<typeof gateway>): Record<string, unknown> {
 Deno.test("a configured activity is loaded by id with the publishable key and composed like Flutter", async () => {
   const g = gateway(await config(), { rows: [row()] });
   assertEquals(await g.connect(), 200);
-  assertEquals(g.requests.length, 1);
-  const request = g.requests[0];
+  const byId = g.requests.filter((r) => r.url.searchParams.has("id"));
+  assertEquals(byId.length, 1);
+  const request = byId[0];
   assertEquals(request.url.pathname, "/rest/v1/activities");
   assertEquals(request.url.searchParams.get("id"), `eq.${ID}`);
   assertEquals(request.headers.get("apikey"), PUBLISHABLE);
@@ -282,17 +283,52 @@ Deno.test("the activity snapshot is immutable for the session and refreshed on r
   await g.deviceText(`{"t":"turn_start","turn":1}`);
   assertEquals(g.setups.length, 2);
   assertEquals(instructionOf(g.setups[1]), first);
-  assertEquals(g.requests.length, 1);
+  assertEquals(g.requests.filter((r) => r.url.searchParams.has("id")).length, 1);
 
   // A reconnect loads a fresh snapshot.
   assertEquals(await g.connect(), 200);
-  assertEquals(g.requests.length, 2);
+  assertEquals(g.requests.filter((r) => r.url.searchParams.has("id")).length, 2);
   const refreshed = instructionOf(g.setups[g.setups.length - 1]);
   assert(refreshed !== first, "new snapshot");
   assert(refreshed.includes("Activitate nouă, schimbată."), "edited prompt");
 
   const parsed = parseActivityRow(row());
   assert(Object.isFrozen(parsed) && Object.isFrozen(parsed.participants), "frozen snapshot");
+});
+
+// --- on-device selection through the handler --------------------------------------------
+
+Deno.test("through the handler: the device gets the list and can switch to a fresh activity", async () => {
+  const OTHER = "11111111-2222-4333-8444-555555555555";
+  const db: Db = {
+    rows: [
+      row(),
+      row({ id: OTHER, title: "Joc nou", prompt: "Alt PROMPTSENTINEL.", participants: [], sort_order: 1 }),
+    ],
+  };
+  const g = gateway(await config(), db);
+  assertEquals(await g.connect(), 200);
+  // deno-lint-ignore no-explicit-any
+  const sent = () => g.sockets[0].sent.map((m) => JSON.parse(m) as any);
+  const list = sent().filter((m) => m.t === "activity_list");
+  assertEquals(list.map((m) => [m.activity, m.current]), [[ID, true], [OTHER, false]]);
+  for (const m of g.sockets[0].sent) {
+    assert(!m.includes("PROMPTSENTINEL") && !m.includes(CHILD), "only metadata reaches the device");
+  }
+
+  await g.deviceText(`{"t":"activity_select","activity":"${OTHER}"}`);
+  assertEquals(g.setups.length, 2);
+  assertEquals(instructionOf(g.setups[1]), composeSystemInstruction({ prompt: "Alt PROMPTSENTINEL.", participants: [] }));
+  assertEquals(sent().filter((m) => m.t === "activity_selected").map((m) => m.activity), [OTHER]);
+
+  // An id that is not an activity is refused; the switched activity stays.
+  await g.deviceText(`{"t":"activity_select","activity":"99999999-9999-4999-8999-999999999999"}`);
+  const refused = sent().filter((m) => m.t === "activity_select_error");
+  assertEquals(refused.map((m) => m.code), ["missing"]);
+  assertEquals(g.setups.length, 2);
+  for (const line of g.logs) {
+    for (const s of SENTINELS) assert(!line.includes(s), `log must not contain ${s}`);
+  }
 });
 
 // --- redaction --------------------------------------------------------------------------

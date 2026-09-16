@@ -40,6 +40,15 @@ const size_t kMaxControlBytes = 512;
 
 const uint32_t kInvalidTurn = 0;
 
+// Activity selection (on-device menu). Only ids, bounded titles and the mode
+// ever reach the device -- never a prompt or participant data.
+const uint32_t kMaxActivities = 8;
+const size_t kActivityIdChars = 36;       // canonical lowercase UUID
+const size_t kMaxActivityTitleBytes = 48;  // UTF-8
+
+// A canonical lowercase UUID: 8-4-4-4-12 hex digits.
+bool isActivityId(const char* text);
+
 enum class FrameError : uint8_t {
   None = 0,
   TooShort,
@@ -75,8 +84,11 @@ FrameError parseAudioFrame(const uint8_t* data, size_t length,
 // would not fit `capacity` or kMaxControlBytes, or an argument is invalid
 // (turn 0; a firmware string outside [A-Za-z0-9._-]{1,24}).
 
+// `activity`: the saved on-device selection, or nullptr/"" for the gateway's
+// configured default. Must be an activity id when given.
 size_t encodeHello(char* out, size_t capacity, const char* firmware,
-                   uint32_t credit);
+                   uint32_t credit, const char* activity = nullptr);
+size_t encodeActivitySelect(char* out, size_t capacity, const char* activity);
 size_t encodeTurnStart(char* out, size_t capacity, uint32_t turn);
 size_t encodeTurnEnd(char* out, size_t capacity, uint32_t turn,
                      uint32_t frames, uint32_t bytes);
@@ -95,6 +107,14 @@ enum class ControlType : uint8_t {
   Error,
   SessionEnd,
   Pong,
+  // One item of the selectable list: index, count, activity, title, mode,
+  // current.
+  ActivityList,
+  // The gateway switched to `activity` (a new Gemini session is ready).
+  ActivitySelected,
+  // A selection (or the saved one sent in hello) was refused: `code`, and
+  // `activity` when known. The previous activity stays in use.
+  ActivitySelectError,
 };
 
 const char* toString(ControlType type);
@@ -123,6 +143,12 @@ struct ControlMessage {
   char session[40];
   char activity[40];
   char format[24];  // "fmt" or "out"
+  // activity_list
+  uint32_t index;
+  uint32_t count;
+  bool current;
+  char title[kMaxActivityTitleBytes + 1];
+  char mode[24];
 };
 
 ControlError parseControl(const char* text, size_t length,

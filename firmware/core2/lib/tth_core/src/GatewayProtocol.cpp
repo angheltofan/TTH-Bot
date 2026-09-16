@@ -48,8 +48,27 @@ const char* toString(ControlType type) {
       return "session_end";
     case ControlType::Pong:
       return "pong";
+    case ControlType::ActivityList:
+      return "activity_list";
+    case ControlType::ActivitySelected:
+      return "activity_selected";
+    case ControlType::ActivitySelectError:
+      return "activity_select_error";
   }
   return "invalid";
+}
+
+bool isActivityId(const char* text) {
+  if (text == nullptr) return false;
+  for (size_t i = 0; i < kActivityIdChars; ++i) {
+    const char c = text[i];
+    if (i == 8 || i == 13 || i == 18 || i == 23) {
+      if (c != '-') return false;
+    } else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      return false;
+    }
+  }
+  return text[kActivityIdChars] == '\0';
 }
 
 const char* toString(ControlError error) {
@@ -144,17 +163,37 @@ bool validFirmware(const char* firmware) {
 }  // namespace
 
 size_t encodeHello(char* out, size_t capacity, const char* firmware,
-                   uint32_t credit) {
+                   uint32_t credit, const char* activity) {
   if (out == nullptr || !validFirmware(firmware)) return 0;
+  const bool withActivity = activity != nullptr && activity[0] != '\0';
+  if (withActivity && !isActivityId(activity)) return 0;
+  if (!withActivity) {
+    return finish(
+        snprintf(out, capacity,
+                 "{\"t\":\"hello\",\"proto\":%u,\"fw\":\"%s\","
+                 "\"in\":\"s16le/16000/1\",\"out\":\"s16le/24000/1\","
+                 "\"maxDown\":%lu,\"credit\":%lu}",
+                 static_cast<unsigned>(kProtocolVersion), firmware,
+                 static_cast<unsigned long>(kMaxDownPcmBytes),
+                 static_cast<unsigned long>(credit)),
+        capacity);
+  }
   return finish(
       snprintf(out, capacity,
                "{\"t\":\"hello\",\"proto\":%u,\"fw\":\"%s\","
                "\"in\":\"s16le/16000/1\",\"out\":\"s16le/24000/1\","
-               "\"maxDown\":%lu,\"credit\":%lu}",
+               "\"maxDown\":%lu,\"credit\":%lu,\"activity\":\"%s\"}",
                static_cast<unsigned>(kProtocolVersion), firmware,
                static_cast<unsigned long>(kMaxDownPcmBytes),
-               static_cast<unsigned long>(credit)),
+               static_cast<unsigned long>(credit), activity),
       capacity);
+}
+
+size_t encodeActivitySelect(char* out, size_t capacity, const char* activity) {
+  if (out == nullptr || !isActivityId(activity)) return 0;
+  return finish(snprintf(out, capacity, "{\"t\":\"activity_select\",\"activity\":\"%s\"}",
+                         activity),
+                capacity);
 }
 
 size_t encodeTurnStart(char* out, size_t capacity, uint32_t turn) {
@@ -287,7 +326,16 @@ enum Field : uint32_t {
   kFieldSession = 1u << 8,
   kFieldActivity = 1u << 9,
   kFieldFormat = 1u << 10,
+  kFieldIndex = 1u << 11,
+  kFieldCount = 1u << 12,
+  kFieldCurrent = 1u << 13,
+  kFieldTitle = 1u << 14,
+  kFieldMode = 1u << 15,
 };
+
+bool validMode(const char* mode) {
+  return strcmp(mode, "push_to_talk") == 0 || strcmp(mode, "free_conversation") == 0;
+}
 
 ControlType typeFor(const char* t) {
   if (strcmp(t, "ready") == 0) return ControlType::Ready;
@@ -297,6 +345,9 @@ ControlType typeFor(const char* t) {
   if (strcmp(t, "error") == 0) return ControlType::Error;
   if (strcmp(t, "session_end") == 0) return ControlType::SessionEnd;
   if (strcmp(t, "pong") == 0) return ControlType::Pong;
+  if (strcmp(t, "activity_list") == 0) return ControlType::ActivityList;
+  if (strcmp(t, "activity_selected") == 0) return ControlType::ActivitySelected;
+  if (strcmp(t, "activity_select_error") == 0) return ControlType::ActivitySelectError;
   return ControlType::Unknown;
 }
 
@@ -316,6 +367,13 @@ uint32_t requiredFor(ControlType type) {
       return kFieldReason;
     case ControlType::Pong:
       return kFieldTs;
+    case ControlType::ActivityList:
+      return kFieldIndex | kFieldCount | kFieldActivity | kFieldTitle | kFieldMode |
+             kFieldCurrent;
+    case ControlType::ActivitySelected:
+      return kFieldActivity;
+    case ControlType::ActivitySelectError:
+      return kFieldCode;
     case ControlType::Unknown:
       return 0;
   }
@@ -441,6 +499,32 @@ ControlError parseControl(const char* text, size_t length,
             !copyField(text_, textLength, out.format, sizeof(out.format))) {
           badValue = true;
         }
+      } else if (strcmp(key, "index") == 0) {
+        bit = kFieldIndex;
+        if (kind != ValueKind::Number) badValue = true;
+        out.index = number;
+      } else if (strcmp(key, "count") == 0) {
+        bit = kFieldCount;
+        if (kind != ValueKind::Number) badValue = true;
+        out.count = number;
+      } else if (strcmp(key, "current") == 0) {
+        bit = kFieldCurrent;
+        if (kind != ValueKind::Bool) badValue = true;
+        out.current = flag;
+      } else if (strcmp(key, "title") == 0) {
+        bit = kFieldTitle;
+        // copyField bounds it to kMaxActivityTitleBytes; an empty title is
+        // refused below.
+        if (kind != ValueKind::String ||
+            !copyField(text_, textLength, out.title, sizeof(out.title))) {
+          badValue = true;
+        }
+      } else if (strcmp(key, "mode") == 0) {
+        bit = kFieldMode;
+        if (kind != ValueKind::String ||
+            !copyField(text_, textLength, out.mode, sizeof(out.mode))) {
+          badValue = true;
+        }
       }
       // A duplicated known key is ambiguous: reject rather than guess.
       if (bit != 0) {
@@ -475,6 +559,25 @@ ControlError parseControl(const char* text, size_t length,
     return ControlError::BadValue;
   }
   if (out.hasTurn && out.turn == kInvalidTurn) return ControlError::BadValue;
+
+  switch (out.type) {
+    case ControlType::ActivityList:
+      if (out.count == 0 || out.count > kMaxActivities || out.index >= out.count ||
+          !isActivityId(out.activity) || out.title[0] == '\0' || !validMode(out.mode)) {
+        return ControlError::BadValue;
+      }
+      break;
+    case ControlType::ActivitySelected:
+      if (!isActivityId(out.activity)) return ControlError::BadValue;
+      break;
+    case ControlType::ActivitySelectError:
+      if ((seen & kFieldActivity) != 0 && !isActivityId(out.activity)) {
+        return ControlError::BadValue;
+      }
+      break;
+    default:
+      break;
+  }
   return ControlError::None;
 }
 

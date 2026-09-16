@@ -7,6 +7,10 @@ export const LIMITS = {
   maxSystemInstructionChars: 12_000,
   maxParticipants: 12,
   maxParticipantNameChars: 40,
+  // On-device activity menu: list size and title bytes the device stores
+  // (firmware GatewayProtocol.h kMaxActivities / kMaxActivityTitleBytes).
+  maxSelectableActivities: 8,
+  maxActivityTitleBytes: 48,
   // 46 s at 16 kHz s16le — the device's own turn buffer capacity.
   maxUserAudioBytesPerTurn: 1_472_000,
   // 120 s at 24 kHz s16le.

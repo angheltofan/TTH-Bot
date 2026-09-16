@@ -48,8 +48,8 @@ state machine, the robot face, microphone capture into a preallocated PSRAM
 turn buffer, live streaming of the user turn to the gateway turn source
 (the offline mock — 16 kHz loopback / 24 kHz synthetic — in diagnostic builds
 only), the ordered outbound queue and the credit-controlled downstream ring,
-non-blocking native-rate playback, real-amplitude cheek bars, the 120 ms
-haptic pulse, barge-in, USB-serial provisioning into NVS, the Wi-Fi station
+non-blocking native-rate playback, real-amplitude cheek bars, the two-pulse
+haptic pattern for refused actions (no vibration when speaking), barge-in, USB-serial provisioning into NVS, the Wi-Fi station
 link with backoff, the Sleeping face, the TLS WebSocket gateway session with a
 pinned CA, and 547 host-side unit tests.
 
@@ -1131,7 +1131,6 @@ D:\deno\deno.exe task start:lan
   [play] stream open: 24000 Hz mono s16le, 3 x 960-sample slots, …
   [app] state waiting -> speaking (face: speaking)
   [play] first audio accepted by speaker … ms after speech start
-  [haptics] vibrate 120 ms (first audio)
   [mem] M3/M4 playback: …
   [gw] turn_complete turn 1 frames=D bytes=B
   [turn] complete: gateway delivered B/2 samples
@@ -1340,6 +1339,64 @@ Collected from Stages 4–6; nothing extra to run. Copy every
 Report per gate: pass/fail, and the lines named in each **Pass**.
 
 ---
+
+## On-device activity selection
+
+**Status: physical test PASSED (2026-09-16, product owner), with the evidence
+split below.** The child chooses the conversation activity on the robot
+itself — no website and no serial command.
+
+Evidence (production firmware `core2-6.4`, real Gemini on the LAN):
+
+- **Proven by the retained logs:** capture `failed=0 dropped=0`; playback
+  `rejects=0 refusals=0`; `creditViolations=0`, `tlsAllocFail=0`; the centre
+  zone did not start capture while the menu was open (`press ignored:
+  activity menu open`); a menu selection on the robot
+  (`select … sent` → `selected … (saved)`, recorded on the build before the
+  haptics change); a saved id sent in `hello` and READY reporting that id;
+  **no vibration when playback starts** (no `[haptics]` line on the current
+  build); no prompt, title, participant name or credential in any log.
+- **Physically confirmed by the product owner, covered by automated tests,
+  not fully captured in the retained logs:** switching to a different activity
+  and its persistence across a reboot on the current build, and the two-pulse
+  vibration when the menu is refused while busy. The gateway's switch ordering
+  (`activity_select` → `gemini_close` → `gemini_ready` → `activity_selected`)
+  and a non-default restore were **not** observed in a retained log (that
+  gateway log was overwritten); they are covered by
+  `gateway/tests/activity_select_test.ts` and `activity_loading_test.ts`.
+- One real-Gemini turn hit the 10 s first-response timeout and recovered
+  (ERROR, then normal turns): a transient, not a selector failure; see
+  PHASE6_PLAN §12.4.
+
+| Touch zone (below the display) | Menu closed (READY, online) | Menu open |
+|---|---|---|
+| **Left**, short press | opens the menu | previous activity (wraps) |
+| **Centre** | push-to-talk, unchanged | confirms the highlighted activity; never starts capture |
+| **Right** | — | next activity (wraps) |
+
+- The menu opens only while online and idle in READY (not during capture,
+  waiting, playback, barge-in or a reconnect); otherwise two short pulses and
+  `[activity] menu refused: <reason>`. It closes after 10 s without input.
+- It shows only `2/4` and the title, reduced to ASCII for the built-in font
+  (`Conversație liberă` → `Conversatie libera`). The device receives only
+  activity ids, titles (≤ 48 UTF-8 bytes) and modes — never a prompt or
+  participant data.
+- Confirming another activity sends `activity_select`; the screen shows
+  `Schimb activitatea...` while the gateway loads a fresh snapshot, closes the
+  Gemini session and opens a new one. Only after the new session is ready does
+  it answer `activity_selected`, the robot saves the id in NVS and the face
+  returns. A refusal (`activity_select_error`) or no answer within 30 s shows
+  `Nu s-a putut schimba` for 2 s; the previous activity stays in use.
+- After a reboot the saved id is sent in `hello`; the gateway restores it, or
+  keeps its configured activity and says why (a missing, disabled or invalid
+  saved activity is then forgotten).
+- Robots with older firmware keep the gateway's configured activity.
+- **Haptics (same firmware):** the robot no longer vibrates when it starts
+  speaking (the 120 ms first-audio pulse is removed). The motor is used only
+  for the two short pulses of a refused action; the `[pb]` heartbeat reports
+  them as `hapticsRefused=N`.
+- Heartbeat: `[activity] current=<id> saved=<id|-> list=N selector=<state>
+  selected=N failed=N timeouts=N listErrors=N`.
 
 ## Phase 0 results — PASSED
 
@@ -2027,7 +2084,7 @@ M5.Mic -> CaptureController -> TurnBuffer (PSRAM) -> TurnStreamer --push--> ITur
 ITurnSource --pull (peek/consume)--> PcmPlayer (3 DMA slots) -> M5SpeakerOutput -> speaker
                                         |
                                         +-> RMS of the chunk being heard -> cheek bars
-                                        +-> first accepted audio -> 120 ms vibration
+                                        +-> first accepted audio -> latency log (no vibration)
 ```
 
 - **Native-rate playback, no resampler.** M5Unified takes the sample rate per
@@ -2051,10 +2108,10 @@ ITurnSource --pull (peek/consume)--> PcmPlayer (3 DMA slots) -> M5SpeakerOutput 
 
 ```
 lib/tth_core/include/tth/  AudioFormat.h  ITurnSource.h  TurnEventQueue.h
-                           TurnStreamer.h  PcmPlayer.h  HapticPulse.h
+                           TurnStreamer.h  PcmPlayer.h  HapticPattern.h
                            LocalMockTurnSource.h  BargeIn.h        (+ src/*.cpp)
 src/audio/M5SpeakerOutput.{h,cpp}   the ONLY M5.Speaker.playRaw() call site
-src/haptics/Haptics.{h,cpp}         non-blocking vibration pulse
+src/haptics/Haptics.{h,cpp}         non-blocking refused-action pattern (two short pulses)
 test/test_audio_format  test_turn_stream  test_playback
      test_turn_events   test_barge_in     test_haptics
 ```
@@ -2108,7 +2165,6 @@ and `[turn] source: local mock, mode=loopback`. Internal free heap should be
 [play] stream open: 16000 Hz mono s16le, 3 x 960-sample slots, audio=speaker
 [app] state waiting -> speaking (face: speaking)
 [play] first audio accepted by speaker N ms after speech start
-[haptics] vibrate 120 ms (first audio)
 [turn] complete: source delivered S samples
 [play] SUMMARY end=completed rate=16000Hz queued=Q played=Q samples=S underruns=0 rejects=0 refusals=0 maxLevel=... audio=none drain=...ms
 [app] state speaking -> ready (face: ready)

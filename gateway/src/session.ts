@@ -19,7 +19,7 @@
 // All dependencies are injected (sockets, token minting, Gemini connector,
 // timers, logger), so the whole session runs against fakes in the tests.
 
-import { ResolvedActivity } from "./activities.ts";
+import { ActivitySummary, ResolvedActivity } from "./activities.ts";
 import { CreditLedger } from "./credit.ts";
 import { DownstreamScheduler } from "./downstream.ts";
 import {
@@ -42,6 +42,9 @@ import {
   encodeSessionEnd,
   encodeSpeechStart,
   encodeTurnComplete,
+  encodeActivityList,
+  encodeActivitySelected,
+  encodeActivitySelectError,
   KIND_MODEL_AUDIO,
   KIND_USER_AUDIO,
   MAX_DOWN_PCM_BYTES,
@@ -77,7 +80,16 @@ export interface SessionDeps {
   allowTurn?: (nowMs: number) => boolean;
   // LAN FAKE MODE ONLY (loadConfig refuses FAKE_* settings otherwise).
   testControls?: SessionTestControls;
+  // On-device activity selection. Absent: the session keeps its configured
+  // activity and refuses selections (older deployments and tests).
+  loadActivity?: (id: string) => Promise<ActivityLoad>;
+  listActivities?: () => Promise<ActivitySummary[]>;
 }
+
+// A fresh, immutable activity snapshot, or why there is none.
+export type ActivityLoad =
+  | { ok: true; resolved: ResolvedActivity; systemInstruction: string }
+  | { ok: false; code: "invalid" | "missing" | "disabled" | "unavailable" };
 
 // Deterministic credit controls for the device's physical gates (Step 6.3).
 export interface SessionTestControls {
@@ -137,6 +149,20 @@ export class DeviceSession {
   #holdingCredit = false;
   #heldCredit = 0;
 
+  // The activity snapshot this session uses. Replaced only by a completed
+  // selection (or the saved one restored at hello), never mutated.
+  #resolved: ResolvedActivity;
+  #systemInstruction: string;
+  // A selection in progress: the snapshot to restore if it fails.
+  #switching: {
+    previous: { resolved: ResolvedActivity; systemInstruction: string };
+    target: string;
+  } | null = null;
+  #activityList: ActivitySummary[] | null = null;
+  #activityListSent = false;
+  // Invalidates a Gemini open that a newer one (or a close) has superseded.
+  #geminiGeneration = 0;
+
   #timers = new Map<string, number>();
   #stats: SessionStats = {
     staleModelFrames: 0,
@@ -149,6 +175,8 @@ export class DeviceSession {
 
   constructor(deps: SessionDeps) {
     this.#d = deps;
+    this.#resolved = deps.resolved;
+    this.#systemInstruction = deps.systemInstruction;
     this.#setTimer("hello", HELLO_TIMEOUT_MS, () => {
       if (this.#phase === "awaiting_hello") this.#protocolError("hello_timeout");
     });
@@ -193,16 +221,27 @@ export class DeviceSession {
         session: this.#d.sessionId,
         fw: msg.fw,
         credit: msg.credit,
-        activity: this.#d.resolved.activity.id,
+        activity: this.#resolved.activity.id,
       });
-      if (this.#d.resolved.convertedFromFreeConversation) {
-        this.#d.log.info("mode_converted", {
-          device: this.#d.deviceId,
-          activity: this.#d.resolved.activity.id,
-          mode: "free_conversation_to_push_to_talk",
-          converted: true,
-        });
+      if (this.#d.listActivities !== undefined) {
+        this.#d.listActivities()
+          .then((list) => {
+            if (this.#isClosed()) return;
+            this.#activityList = list.slice(0, LIMITS.maxSelectableActivities);
+            this.#sendActivityList();
+          })
+          .catch(() => this.#d.log.warn("activity_list_unavailable", { device: this.#d.deviceId }));
       }
+      if (
+        msg.activity !== undefined && msg.activity !== this.#resolved.activity.id &&
+        this.#d.loadActivity !== undefined
+      ) {
+        // The device's saved selection: load it before Gemini opens, so the
+        // first session already uses it.
+        void this.#restoreActivity(msg.activity);
+        return;
+      }
+      this.#logModeConversion();
       this.#openGemini();
       return;
     }
@@ -236,6 +275,8 @@ export class DeviceSession {
       case "ping":
         this.#down!.pushPriority(encodePong(msg.ts));
         return this.#pump();
+      case "activity_select":
+        return void this.#selectActivity(msg.activity);
       case "unknown":
         this.#stats.unknownMessages += 1;
         return;
@@ -300,6 +341,11 @@ export class DeviceSession {
   // --- turns ------------------------------------------------------------------------
 
   #turnStart(turn: number): void {
+    if (this.#switching !== null) {
+      // The activity is being replaced: no turn until the new session is up.
+      this.#down!.pushControl(turn, encodeError("busy", true, turn));
+      return this.#pump();
+    }
     if (this.#d.allowTurn && !this.#d.allowTurn(this.#d.timers.now())) {
       this.#down!.pushControl(turn, encodeError("rate_limited", true, turn));
       return this.#pump();
@@ -439,17 +485,21 @@ export class DeviceSession {
   }
 
   #openGemini(): void {
+    const generation = ++this.#geminiGeneration;
     this.#geminiConnecting = true;
     this.#geminiReady = false;
     this.#geminiRetire = false;
     this.#stats.geminiOpens += 1;
     this.#setTimer("setup", LIMITS.geminiSetupTimeoutMs, () => this.#geminiFailed("gemini_setup_timeout"));
+    // The instruction of the snapshot current NOW: a later switch cannot
+    // change what this session was opened with.
+    const systemInstruction = this.#systemInstruction;
     const opening = (async () => {
       const token = await this.#d.mintToken();
-      if (this.#isClosed()) return;
+      if (this.#isClosed() || generation !== this.#geminiGeneration) return;
       const link = await this.#d.connectGemini(
         token,
-        buildSetupMessage(this.#d.systemInstruction),
+        buildSetupMessage(systemInstruction),
         {
           onEvent: (event) => {
             if (this.#gemini === link) this.#onGemini(event);
@@ -459,14 +509,17 @@ export class DeviceSession {
           },
         },
       );
-      if (this.#isClosed()) {
+      if (this.#isClosed() || generation !== this.#geminiGeneration) {
+        // Superseded (closed, or replaced by a newer open) while connecting.
         link.close();
         return;
       }
       this.#gemini = link;
       this.#geminiOpenedAt = this.#d.timers.now();
     })();
-    opening.catch(() => this.#geminiFailed("gemini_unavailable"));
+    opening.catch(() => {
+      if (generation === this.#geminiGeneration) this.#geminiFailed("gemini_unavailable");
+    });
   }
 
   #geminiFailed(code: string): void {
@@ -481,7 +534,109 @@ export class DeviceSession {
       this.close(1011, code);
       return;
     }
+    if (this.#switching !== null) {
+      // The new activity's Gemini session did not come up: the previous
+      // activity is restored (its Gemini session reopens on the next turn).
+      const switching = this.#switching;
+      this.#switching = null;
+      this.#resolved = switching.previous.resolved;
+      this.#systemInstruction = switching.previous.systemInstruction;
+      this.#selectError("gemini_unavailable", switching.target);
+      return;
+    }
     this.#failActiveTurn(code);
+  }
+
+  // --- activity selection ------------------------------------------------------------
+
+  #logModeConversion(): void {
+    if (!this.#resolved.convertedFromFreeConversation) return;
+    this.#d.log.info("mode_converted", {
+      device: this.#d.deviceId,
+      activity: this.#resolved.activity.id,
+      mode: "free_conversation_to_push_to_talk",
+      converted: true,
+    });
+  }
+
+  async #load(id: string): Promise<ActivityLoad> {
+    try {
+      return await this.#d.loadActivity!(id);
+    } catch {
+      return { ok: false, code: "unavailable" };
+    }
+  }
+
+  async #restoreActivity(id: string): Promise<void> {
+    const result = await this.#load(id);
+    if (this.#isClosed()) return;
+    if (result.ok) {
+      this.#resolved = result.resolved;
+      this.#systemInstruction = result.systemInstruction;
+      this.#d.log.info("activity_restored", { device: this.#d.deviceId, activity: id });
+    } else {
+      // The configured activity stays; the device is told why.
+      this.#selectError(result.code, id);
+    }
+    this.#logModeConversion();
+    this.#openGemini();
+  }
+
+  async #selectActivity(id: string): Promise<void> {
+    if (this.#d.loadActivity === undefined) return this.#selectError("unavailable", id);
+    if (
+      this.#switching !== null || this.#up !== null || this.#response !== null ||
+      this.#fence !== null
+    ) {
+      return this.#selectError("busy", id);
+    }
+    if (id === this.#resolved.activity.id) {
+      this.#down!.pushPriority(encodeActivitySelected(id));
+      this.#d.log.info("activity_selected", { device: this.#d.deviceId, activity: id, code: "unchanged" });
+      return this.#pump();
+    }
+    this.#switching = {
+      previous: { resolved: this.#resolved, systemInstruction: this.#systemInstruction },
+      target: id,
+    };
+    this.#d.log.info("activity_select", { device: this.#d.deviceId, activity: id });
+    // A FRESH snapshot first. Until it is known good, nothing changes: the
+    // current Gemini session stays open and usable.
+    const result = await this.#load(id);
+    if (this.#isClosed() || this.#switching === null || this.#switching.target !== id) return;
+    if (!result.ok) {
+      this.#switching = null;
+      return this.#selectError(result.code, id);
+    }
+    this.#resolved = result.resolved;
+    this.#systemInstruction = result.systemInstruction;
+    this.#logModeConversion();
+    // Replace the Gemini session: close the old one, open one with the new
+    // instruction. activity_selected is sent only once it is ready.
+    this.#closeGemini("activity_changed");
+    this.#pending = [];
+    this.#pendingChars = 0;
+    this.#openGemini();
+  }
+
+  #selectError(code: "invalid" | "missing" | "disabled" | "unavailable" | "busy" | "gemini_unavailable", id: string): void {
+    this.#d.log.warn("activity_select_failed", { device: this.#d.deviceId, activity: id, code });
+    this.#down?.pushPriority(encodeActivitySelectError(code, id));
+    this.#pump();
+  }
+
+  #sendActivityList(): void {
+    const list = this.#activityList;
+    if (this.#phase !== "ready" || list === null || this.#activityListSent) return;
+    this.#activityListSent = true;
+    const current = this.#resolved.activity.id;
+    list.forEach((a, index) => {
+      this.#down!.pushPriority(
+        encodeActivityList(index, list.length, a.id, a.title, a.mode, a.id === current),
+      );
+    });
+    this.#d.log.info("activity_list_sent", { device: this.#d.deviceId, count: list.length });
+    this.#pump();
   }
 
   #failActiveTurn(code: string): void {
@@ -528,10 +683,19 @@ export class DeviceSession {
         if (this.#phase === "connecting") {
           this.#phase = "ready";
           this.#down!.pushPriority(
-            encodeReady(this.#d.sessionId, this.#d.resolved.activity.id),
+            encodeReady(this.#d.sessionId, this.#resolved.activity.id),
           );
           this.#pump();
           this.#armIdle();
+          this.#sendActivityList();
+        }
+        if (this.#switching !== null) {
+          // The new activity's Gemini session is ready: the switch is done.
+          const id = this.#resolved.activity.id;
+          this.#switching = null;
+          this.#down!.pushPriority(encodeActivitySelected(id));
+          this.#d.log.info("activity_selected", { device: this.#d.deviceId, activity: id });
+          this.#pump();
         }
         return;
       }
@@ -641,6 +805,8 @@ export class DeviceSession {
   }
 
   #closeGemini(reason: string): void {
+    // Any open still in flight is superseded too.
+    this.#geminiGeneration += 1;
     const link = this.#gemini;
     this.#gemini = null;
     this.#geminiReady = false;

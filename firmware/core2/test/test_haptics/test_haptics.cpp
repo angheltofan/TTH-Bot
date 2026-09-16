@@ -1,6 +1,10 @@
-// Host-side tests for the haptic pulse: one non-blocking 120 ms pulse, fired
-// when the speaker first ACCEPTS audio -- not when speech is announced, and
-// not continuously through the response.
+// Host-side tests for haptics.
+//
+// The motor has ONE use: the two-short-pulse pattern when an action is
+// refused. There is no vibration when the robot starts speaking (the former
+// 120 ms first-audio pulse was removed by product decision) -- while the
+// player still reports the first accepted audio exactly once per stream,
+// because the latency log and the M4 memory point use it.
 
 #include <string.h>
 
@@ -11,12 +15,9 @@
 #include "tth/AudioBus.h"
 #include "tth/AudioFormat.h"
 #include "tth/HapticPattern.h"
-#include "tth/HapticPulse.h"
 #include "tth/PcmPlayer.h"
 
 namespace {
-
-const uint32_t kPulseMs = 120;
 
 class FakeAudioDevice : public tth::IAudioDevice {
  public:
@@ -48,25 +49,28 @@ const uint32_t kSlot = 8;
 int16_t g_slots[3][kSlot];
 int16_t g_pcm[kSlot];
 
-// What App does each loop: service the player, pulse on first audio, poll the
-// pulse. Returns how many times the motor was switched on and off.
+const uint16_t kDenied[3] = {40, 80, 40};
+
+// What App does each loop during playback: service the player, log the first
+// accepted audio, poll haptics. The only haptic output App has is the refused
+// pattern, which playback never starts.
 struct Rig {
   FakeAudioDevice device;
   tth::AudioBus bus;
   Speaker speaker;
   tth::PcmPlayer player;
-  tth::HapticPulse pulse;
-  uint32_t on = 0;
-  uint32_t off = 0;
+  tth::HapticPattern haptics;
+  uint32_t firstAudio = 0;
+  uint32_t motorChanges = 0;
 
-  Rig() : bus(device), player(bus, speaker, 400), pulse(kPulseMs) {
+  Rig() : bus(device), player(bus, speaker, 400), haptics(kDenied, 3) {
     player.begin(g_slots[0], g_slots[1], g_slots[2], kSlot);
   }
 
   void loop(uint32_t nowMs) {
     player.service(nowMs);
-    if (player.consumeFirstAudio() && pulse.start(nowMs)) ++on;
-    if (pulse.poll(nowMs)) ++off;
+    if (player.consumeFirstAudio()) ++firstAudio;
+    if (haptics.poll(nowMs) != tth::HapticPattern::Motor::NoChange) ++motorChanges;
   }
 
   void feed() {
@@ -84,45 +88,13 @@ struct Rig {
 void setUp() {}
 void tearDown() {}
 
-static void a_pulse_switches_on_then_off_exactly_once() {
-  tth::HapticPulse pulse(kPulseMs);
+// --- playback never vibrates ------------------------------------------------------
 
-  TEST_ASSERT_TRUE(pulse.start(1000));
-  TEST_ASSERT_TRUE(pulse.isActive());
-
-  TEST_ASSERT_FALSE(pulse.poll(1000 + kPulseMs - 1));
-  TEST_ASSERT_TRUE(pulse.isActive());
-
-  TEST_ASSERT_TRUE(pulse.poll(1000 + kPulseMs));
-  TEST_ASSERT_FALSE(pulse.isActive());
-  TEST_ASSERT_FALSE(pulse.poll(1000 + kPulseMs + 1));
-  TEST_ASSERT_FALSE(pulse.poll(5000));
-  TEST_ASSERT_EQUAL_UINT32(1, pulse.pulses());
-}
-
-static void a_running_pulse_is_not_restarted_or_extended() {
-  tth::HapticPulse pulse(kPulseMs);
-  TEST_ASSERT_TRUE(pulse.start(1000));
-  TEST_ASSERT_FALSE(pulse.start(1100));
-  // Still ends 120 ms after the FIRST start.
-  TEST_ASSERT_TRUE(pulse.poll(1000 + kPulseMs));
-  TEST_ASSERT_EQUAL_UINT32(1, pulse.pulses());
-}
-
-static void a_pulse_across_the_millis_rollover_still_lasts_120ms() {
-  tth::HapticPulse pulse(kPulseMs);
-  const uint32_t nearMax = 0xFFFFFFC0u;
-  TEST_ASSERT_TRUE(pulse.start(nearMax));
-  TEST_ASSERT_FALSE(pulse.poll(nearMax + kPulseMs - 1));
-  TEST_ASSERT_TRUE(pulse.poll(nearMax + kPulseMs));
-}
-
-// A whole response of twenty chunks produces ONE pulse -- no continuous
-// vibration through the response.
-static void one_response_produces_exactly_one_pulse() {
+// A whole response of twenty chunks: the first audio is reported once, and
+// the motor is never switched.
+static void a_whole_response_never_vibrates() {
   Rig rig;
   TEST_ASSERT_TRUE(rig.player.openStream(tth::monoS16(24000), 0));
-
   uint32_t t = 0;
   for (int chunk = 0; chunk < 20; ++chunk) {
     rig.feed();
@@ -133,27 +105,29 @@ static void one_response_produces_exactly_one_pulse() {
     rig.speaker.held.clear();
   }
   rig.loop(t + 1000);
-
-  TEST_ASSERT_EQUAL_UINT32(1, rig.on);
-  TEST_ASSERT_EQUAL_UINT32(1, rig.off);
+  TEST_ASSERT_EQUAL_UINT32(1, rig.firstAudio);
+  TEST_ASSERT_EQUAL_UINT32(0, rig.haptics.starts());
+  TEST_ASSERT_EQUAL_UINT32(0, rig.motorChanges);
 }
 
-// The pulse follows the first ACCEPTED audio, not the announcement: opening
-// the stream alone, or queueing into the ring, does not vibrate.
-static void no_pulse_until_the_speaker_accepts_audio() {
+// First audio is still reported only once the speaker ACCEPTS audio (speaker
+// startup unchanged), and still without any vibration.
+static void first_audio_is_reported_when_the_speaker_accepts_without_vibration() {
   Rig rig;
   TEST_ASSERT_TRUE(rig.player.openStream(tth::monoS16(24000), 0));
   rig.speaker.refuse = true;
   rig.feed();
   for (uint32_t t = 0; t < 500; t += 10) rig.loop(t);
-  TEST_ASSERT_EQUAL_UINT32(0, rig.on);
-
+  TEST_ASSERT_EQUAL_UINT32(0, rig.firstAudio);
   rig.speaker.refuse = false;
   rig.loop(500);
-  TEST_ASSERT_EQUAL_UINT32(1, rig.on);
+  TEST_ASSERT_EQUAL_UINT32(1, rig.firstAudio);
+  TEST_ASSERT_EQUAL_UINT32(0, rig.haptics.starts());
 }
 
-static void every_new_response_gets_its_own_pulse() {
+// Every response reports its own first audio; the refused-pattern counter
+// (the heartbeat's hapticsRefused) is not moved by any of them.
+static void responses_do_not_move_the_refused_counter() {
   Rig rig;
   for (int response = 0; response < 3; ++response) {
     const uint32_t base = static_cast<uint32_t>(response) * 1000u;
@@ -165,15 +139,14 @@ static void every_new_response_gets_its_own_pulse() {
     rig.loop(base + 200);
     TEST_ASSERT_TRUE(rig.player.release());
   }
-  TEST_ASSERT_EQUAL_UINT32(3, rig.on);
-  TEST_ASSERT_EQUAL_UINT32(3, rig.off);
+  TEST_ASSERT_EQUAL_UINT32(3, rig.firstAudio);
+  TEST_ASSERT_EQUAL_UINT32(0, rig.haptics.starts());
+  // A refused action is still counted, exactly once per pattern.
+  TEST_ASSERT_TRUE(rig.haptics.start(5000));
+  TEST_ASSERT_EQUAL_UINT32(1, rig.haptics.starts());
 }
 
-// --- Step 6.1: the refused-press pattern (two short pulses) ------------------
-
-namespace {
-const uint16_t kDenied[3] = {40, 80, 40};
-}  // namespace
+// --- the refused pattern (two short pulses), unchanged ------------------------------
 
 static void the_denied_pattern_is_two_short_pulses() {
   using Motor = tth::HapticPattern::Motor;
@@ -211,11 +184,8 @@ int main(int, char**) {
   RUN_TEST(the_denied_pattern_is_two_short_pulses);
   RUN_TEST(a_running_pattern_is_not_restarted);
   RUN_TEST(a_slow_loop_still_ends_with_the_motor_off);
-  RUN_TEST(a_pulse_switches_on_then_off_exactly_once);
-  RUN_TEST(a_running_pulse_is_not_restarted_or_extended);
-  RUN_TEST(a_pulse_across_the_millis_rollover_still_lasts_120ms);
-  RUN_TEST(one_response_produces_exactly_one_pulse);
-  RUN_TEST(no_pulse_until_the_speaker_accepts_audio);
-  RUN_TEST(every_new_response_gets_its_own_pulse);
+  RUN_TEST(a_whole_response_never_vibrates);
+  RUN_TEST(first_audio_is_reported_when_the_speaker_accepts_without_vibration);
+  RUN_TEST(responses_do_not_move_the_refused_counter);
   return UNITY_END();
 }

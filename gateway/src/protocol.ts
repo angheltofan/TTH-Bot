@@ -115,7 +115,10 @@ export type DeviceMessage =
     out: string;
     maxDown: number;
     credit: number;
+    // The device's saved activity selection; absent = the configured default.
+    activity?: string;
   }
+  | { t: "activity_select"; activity: string }
   | { t: "turn_start"; turn: number }
   | { t: "turn_end"; turn: number; frames: number; bytes: number }
   | { t: "cancel"; turn: number }
@@ -137,6 +140,11 @@ export type ParseResult =
   | { ok: false; error: ControlError };
 
 const FIRMWARE_RE = /^[A-Za-z0-9._-]{1,24}$/;
+// A canonical lowercase UUID, exactly as the device validates it.
+export const ACTIVITY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const MAX_ACTIVITIES = 8;
+export const MAX_ACTIVITY_TITLE_BYTES = 48;
+export type ActivityMode = "push_to_talk" | "free_conversation";
 
 function fail(error: ControlError): ParseResult {
   return { ok: false, error };
@@ -181,6 +189,9 @@ export function parseDeviceMessage(text: string): ParseResult {
         obj.maxDown > MAX_DOWN_PCM_BYTES
       ) return fail("bad_value");
       if (!isU32(obj.credit)) return fail("bad_value");
+      if ("activity" in obj && (typeof obj.activity !== "string" || !ACTIVITY_ID_RE.test(obj.activity))) {
+        return fail("bad_value");
+      }
       return {
         ok: true,
         msg: {
@@ -191,8 +202,16 @@ export function parseDeviceMessage(text: string): ParseResult {
           out: obj.out,
           maxDown: obj.maxDown,
           credit: obj.credit,
+          ...(typeof obj.activity === "string" ? { activity: obj.activity } : {}),
         },
       };
+    }
+    case "activity_select": {
+      if (!need("activity")) return fail("missing_field");
+      if (typeof obj.activity !== "string" || !ACTIVITY_ID_RE.test(obj.activity)) {
+        return fail("bad_value");
+      }
+      return { ok: true, msg: { t, activity: obj.activity } };
     }
     case "turn_start":
     case "cancel": {
@@ -284,6 +303,50 @@ export function encodeError(code: string, retry: boolean, turn?: number): string
 export function encodeSessionEnd(reason: string): string {
   if (!REASON_RE.test(reason)) throw new RangeError("invalid reason");
   return finish({ t: "session_end", reason });
+}
+
+// A display title the device can store and parse: no quote, backslash or
+// control character (the device parser takes no escapes), whitespace
+// collapsed, at most MAX_ACTIVITY_TITLE_BYTES of UTF-8 cut on a character
+// boundary, never empty.
+export function safeActivityTitle(title: string): string {
+  const cleaned = title.replace(/["\\ -]/g, " ").replace(/\s+/g, " ").trim();
+  let out = "";
+  for (const ch of cleaned) {
+    if (utf8Length(out + ch) > MAX_ACTIVITY_TITLE_BYTES) break;
+    out += ch;
+  }
+  out = out.trim();
+  return out.length > 0 ? out : "Activitate";
+}
+
+export function encodeActivityList(
+  index: number,
+  count: number,
+  activity: string,
+  title: string,
+  mode: ActivityMode,
+  current: boolean,
+): string {
+  if (!isU32(count) || count < 1 || count > MAX_ACTIVITIES || !isU32(index) || index >= count) {
+    throw new RangeError("invalid activity list position");
+  }
+  if (!ACTIVITY_ID_RE.test(activity)) throw new RangeError("invalid activity id");
+  if (safeActivityTitle(title) !== title) throw new RangeError("unsafe activity title");
+  if (mode !== "push_to_talk" && mode !== "free_conversation") throw new RangeError("invalid mode");
+  return finish({ t: "activity_list", index, count, activity, title, mode, current });
+}
+
+export function encodeActivitySelected(activity: string): string {
+  if (!ACTIVITY_ID_RE.test(activity)) throw new RangeError("invalid activity id");
+  return finish({ t: "activity_selected", activity });
+}
+
+export function encodeActivitySelectError(code: string, activity?: string): string {
+  if (!CODE_RE.test(code)) throw new RangeError("invalid error code");
+  if (activity === undefined) return finish({ t: "activity_select_error", code });
+  if (!ACTIVITY_ID_RE.test(activity)) throw new RangeError("invalid activity id");
+  return finish({ t: "activity_select_error", code, activity });
 }
 
 export function encodePong(ts: number): string {
