@@ -134,8 +134,25 @@ export async function handle(req: Request, deps: HandlerDeps): Promise<Response>
     const token = await deps.mint();
     deps.log("gateway_mint_ok");
     return json({ token }, 200);
-  } catch {
-    deps.log("gateway_mint_upstream_failed");
+  } catch (error) {
+    // Diagnostic: Google's numeric HTTP status only, and only in the log. The
+    // client body stays generic.
+    const status = upstreamStatus(error);
+    if (status === null) {
+      deps.log("gateway_mint_upstream_failed");
+    } else {
+      deps.log("gateway_mint_upstream_failed", { status });
+    }
     return json({ error: "Failed to mint Gemini ephemeral token" }, 502);
   }
+}
+
+// A valid HTTP status carried by the mint error, or null. Nothing else from
+// the error (message, body, stack) is ever used.
+export function upstreamStatus(error: unknown): number | null {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" && Number.isInteger(status) && status >= 100 &&
+      status <= 599
+    ? status
+    : null;
 }

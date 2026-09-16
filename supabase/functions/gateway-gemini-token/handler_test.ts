@@ -6,7 +6,7 @@
 // against (gateway/tests/adapters_test.ts), computed independently with Node.
 
 import { AdmitResult, expectedSignature, handle, HandlerDeps, MINT_HEADER } from "./handler.ts";
-import { mintEphemeralToken } from "./mint.ts";
+import { GEMINI_AUTH_TOKENS_URL, mintEphemeralToken, rfc3339Seconds, UpstreamMintError } from "./mint.ts";
 
 function assert(condition: unknown, message = "assertion failed"): asserts condition {
   if (!condition) throw new Error(message);
@@ -182,22 +182,153 @@ Deno.test("logs never contain the header, nonce, signature or token", async () =
   assert(!all.includes(NONCE) && !all.includes("ephemeral-token") && !all.includes(SECRET));
 });
 
-Deno.test("mint uses the same Gemini constraints as gemini-token", async () => {
-  let body: Record<string, unknown> = {};
-  let key = "";
-  const fetchFn = ((_url: string, init: RequestInit) => {
-    body = JSON.parse(init.body as string);
-    key = new Headers(init.headers).get("x-goog-api-key") ?? "";
-    return Promise.resolve(new Response('{"name":"auth_tokens/abc"}', { status: 200 }));
+Deno.test("upstream failure: the numeric status is logged, the client body stays generic", async () => {
+  const lines: string[] = [];
+  const { d } = deps({
+    mint: () => Promise.reject(new UpstreamMintError(400)),
+    log: (e, f) => lines.push(JSON.stringify(f === undefined ? { event: e } : { event: e, ...f })),
+  });
+  const res = await handle(await request(await signed()), d);
+  assertEquals(res.status, 502);
+  const body = await res.text();
+  assertEquals(body, '{"error":"Failed to mint Gemini ephemeral token"}');
+  assert(!body.includes("400"), "no upstream status in the client body");
+  assertEquals(lines[lines.length - 1], '{"event":"gateway_mint_upstream_failed","status":400}');
+});
+
+Deno.test("upstream failure log carries nothing but the status", async () => {
+  const API_KEY = "API-KEY-SENTINEL-0123456789";
+  const UPSTREAM_MESSAGE = "API key not valid. Please pass a valid API key. BODY-SENTINEL";
+  const fetchFn = (() =>
+    Promise.resolve(
+      new Response(JSON.stringify({ error: { message: UPSTREAM_MESSAGE } }), {
+        status: 403,
+        headers: { "x-upstream-header": "HEADER-SENTINEL" },
+      }),
+    )) as unknown as typeof fetch;
+
+  let thrown: unknown;
+  try {
+    await mintEphemeralToken(API_KEY, NOW, fetchFn);
+  } catch (e) {
+    thrown = e;
+  }
+  assert(thrown instanceof UpstreamMintError, "a typed upstream error");
+  assertEquals((thrown as UpstreamMintError).status, 403);
+  const errorText = `${(thrown as Error).message} ${(thrown as Error).stack ?? ""}`;
+  assert(!errorText.includes("BODY-SENTINEL") && !errorText.includes(API_KEY), "the error holds no body or key");
+
+  const lines: string[] = [];
+  const header = await signed();
+  const { d } = deps({
+    mint: () => mintEphemeralToken(API_KEY, NOW, fetchFn),
+    log: (e, f) => lines.push(JSON.stringify(f === undefined ? { event: e } : { event: e, ...f })),
+  });
+  const res = await handle(await request(header), d);
+  assertEquals(res.status, 502);
+  const all = lines.join("\n");
+  assertEquals(lines[lines.length - 1], '{"event":"gateway_mint_upstream_failed","status":403}');
+  for (
+    const forbidden of [
+      API_KEY,
+      "BODY-SENTINEL",
+      "API key not valid",
+      "HEADER-SENTINEL",
+      NONCE,
+      header,
+      header.split("sig=")[1],
+      SECRET,
+      "ephemeral-token",
+    ]
+  ) {
+    assert(!all.includes(forbidden), `log must not contain ${forbidden.slice(0, 12)}…`);
+  }
+});
+
+Deno.test("a failure without a valid HTTP status logs the event alone", async () => {
+  for (
+    const error of [
+      new Error("unexpected auth_tokens response"),
+      { status: "400" },
+      { status: 42 },
+      { status: 400.5 },
+      null,
+    ]
+  ) {
+    const lines: string[] = [];
+    const { d } = deps({
+      mint: () => Promise.reject(error),
+      log: (e, f) => lines.push(JSON.stringify(f === undefined ? { event: e } : { event: e, ...f })),
+    });
+    assertEquals((await handle(await request(await signed()), d)).status, 502);
+    assertEquals(lines[lines.length - 1], '{"event":"gateway_mint_upstream_failed"}');
+  }
+});
+
+// The exact outgoing REST request (docs: live-api/ephemeral-tokens).
+async function captureMintRequest(nowMs: number) {
+  const seen = { url: "", method: "", headers: new Headers(), bodyText: "", calls: 0 };
+  const fetchFn = ((url: string, init: RequestInit) => {
+    seen.calls++;
+    seen.url = url;
+    seen.method = init.method ?? "";
+    seen.headers = new Headers(init.headers);
+    seen.bodyText = init.body as string;
+    return Promise.resolve(new Response('{"name":"auth_tokens/TOKEN-SENTINEL"}', { status: 200 }));
   }) as unknown as typeof fetch;
-  const token = await mintEphemeralToken("k", NOW, fetchFn);
-  assertEquals(token, "auth_tokens/abc");
-  assertEquals(key, "k");
+  const token = await mintEphemeralToken("API-KEY-SENTINEL", nowMs, fetchFn);
+  return { seen, token };
+}
+
+Deno.test("REST request: endpoint, method and the API key only in x-goog-api-key", async () => {
+  const { seen, token } = await captureMintRequest(NOW);
+  assertEquals(seen.calls, 1);
+  assertEquals(seen.url, "https://generativelanguage.googleapis.com/v1beta/auth_tokens");
+  assertEquals(GEMINI_AUTH_TOKENS_URL, seen.url);
+  assertEquals(seen.method, "POST");
+  assertEquals(seen.headers.get("x-goog-api-key"), "API-KEY-SENTINEL");
+  assertEquals(seen.headers.get("content-type"), "application/json");
+  assertEquals(seen.headers.get("authorization"), null);
+  assert(!seen.url.includes("API-KEY-SENTINEL"), "no key in the URL");
+  assert(!seen.bodyText.includes("API-KEY-SENTINEL"), "no key in the body");
+  assertEquals(token, "auth_tokens/TOKEN-SENTINEL");
+});
+
+Deno.test("REST request: exactly uses, expireTime and newSessionExpireTime", async () => {
+  const { seen } = await captureMintRequest(NOW);
+  const body = JSON.parse(seen.bodyText) as Record<string, unknown>;
+  assertEquals(Object.keys(body).sort().join(","), "expireTime,newSessionExpireTime,uses");
   assertEquals(body.uses, 1);
-  assertEquals(
-    JSON.stringify(body.liveConnectConstraints),
-    '{"model":"models/gemini-3.1-flash-live-preview","config":{"responseModalities":["AUDIO"]}}',
-  );
-  assertEquals(body.newSessionExpireTime, new Date(NOW + 60_000).toISOString());
-  assertEquals(body.expireTime, new Date(NOW + 30 * 60_000).toISOString());
+  // No SDK-style constraint wrapper, no snake_case, no model constraint.
+  for (const forbidden of ["liveConnectConstraints", "config", "model", "expire_time", "new_session_expire_time", "live_connect_constraints", "responseModalities", "gemini-"]) {
+    assert(!seen.bodyText.includes(forbidden), `body must not contain ${forbidden}`);
+  }
+});
+
+Deno.test("REST request: whole-second UTC RFC 3339 timestamps, 60 s and 30 min ahead", async () => {
+  const now = Date.UTC(2026, 8, 16, 11, 10, 5, 987); // with milliseconds on purpose
+  const { seen } = await captureMintRequest(now);
+  const body = JSON.parse(seen.bodyText) as { expireTime: string; newSessionExpireTime: string };
+  const RFC3339_UTC_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+  assert(RFC3339_UTC_SECONDS.test(body.expireTime), "expireTime format");
+  assert(RFC3339_UTC_SECONDS.test(body.newSessionExpireTime), "newSessionExpireTime format");
+  assertEquals(body.newSessionExpireTime, "2026-09-16T11:11:05Z");
+  assertEquals(body.expireTime, "2026-09-16T11:40:05Z");
+  assertEquals(rfc3339Seconds(Date.UTC(2026, 0, 1, 0, 0, 0, 999)), "2026-01-01T00:00:00Z");
+});
+
+Deno.test("successful mint: the handler logs neither the token nor the API key", async () => {
+  const lines: string[] = [];
+  const header = await signed();
+  const { d } = deps({
+    mint: async () => (await captureMintRequest(NOW)).token,
+    log: (e, f) => lines.push(JSON.stringify(f === undefined ? { event: e } : { event: e, ...f })),
+  });
+  const res = await handle(await request(header), d);
+  assertEquals(res.status, 200);
+  const all = lines.join("\n");
+  assertEquals(all, '{"event":"gateway_mint_ok"}');
+  for (const forbidden of ["TOKEN-SENTINEL", "API-KEY-SENTINEL", NONCE, header, SECRET]) {
+    assert(!all.includes(forbidden), "no credential or token in the log");
+  }
 });
