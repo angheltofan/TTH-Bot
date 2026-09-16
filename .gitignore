@@ -43,3 +43,21 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# PlatformIO (firmware/core2) — build output, local metadata and the
+# downloaded toolchain/library cache. None of it is source.
+.pio/
+firmware/core2/.pio/
+
+# Phase 6: secrets never enter Git (PHASE6_PLAN §4.1)
+gateway/.env
+gateway/.env.*
+!gateway/.env.example
+firmware/core2/secrets*
+*.pem.key
+*.key.pem
+*-key.pem
+# Phase 6.0: per-run output of the real-Gemini probe (timings only, no secrets)
+gateway/manual/last_live_probe.json
+# Phase 6.2: LAN development CA and gateway certificate + PRIVATE KEYS
+gateway/.dev-certs/
