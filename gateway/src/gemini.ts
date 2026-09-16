@@ -8,7 +8,12 @@
 
 export const GEMINI_MODEL = "models/gemini-3.1-flash-live-preview";
 export const GEMINI_VOICE = "Puck";
+// Ephemeral tokens work ONLY with the Constrained method
+// (https://ai.google.dev/api/live): the gateway always connects here.
 export const GEMINI_WS_URL = "wss://generativelanguage.googleapis.com/ws/" +
+  "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained";
+// Developer API keys use the unconstrained method. Local manual probes only.
+export const GEMINI_WS_URL_API_KEY = "wss://generativelanguage.googleapis.com/ws/" +
   "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
 export function buildSetupMessage(systemInstruction: string): string {
@@ -122,15 +127,32 @@ export type GeminiConnector = (
   handlers: GeminiHandlers,
 ) => Promise<GeminiLink>;
 
-// `authParam` is "access_token" for ephemeral tokens (always, in the gateway).
-// "key" exists only for the local manual probe with a developer key.
+// `authParam` is "access_token" for ephemeral tokens (always, in the gateway),
+// which connect to the Constrained method. "key" exists only for the local
+// manual probe with a developer key, on the unconstrained method.
+export function liveSocketUrl(
+  token: string,
+  authParam: "access_token" | "key" = "access_token",
+  url?: string,
+): string {
+  const base = url ?? (authParam === "key" ? GEMINI_WS_URL_API_KEY : GEMINI_WS_URL);
+  return `${base}?${authParam}=${encodeURIComponent(token)}`;
+}
+
 export function webSocketConnector(
-  url = GEMINI_WS_URL,
+  url?: string,
   authParam: "access_token" | "key" = "access_token",
 ): GeminiConnector {
   return (token, setup, handlers) =>
     new Promise((resolve, reject) => {
-      const ws = new WebSocket(`${url}?${authParam}=${encodeURIComponent(token)}`);
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(liveSocketUrl(token, authParam, url));
+      } catch {
+        // The runtime's message would contain the URL, and so the token.
+        reject(new Error("gemini_connect_failed"));
+        return;
+      }
       ws.binaryType = "arraybuffer";
       let opened = false;
       const decoder = new TextDecoder();
