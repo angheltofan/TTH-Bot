@@ -56,7 +56,9 @@ function Send([string] $method, [string] $path, [string] $body, [hashtable] $hea
   $request = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::new($method)), "$url/rest/v1/$path"
   $request.Headers.Add('apikey', $key)
   if ($headers) { foreach ($k in $headers.Keys) { $request.Headers.Add($k, $headers[$k]) } }
-  if ($null -ne $body) {
+  # A [string] parameter turns $null into '', so test for empty: GET and
+  # DELETE must not carry a body.
+  if (-not [string]::IsNullOrEmpty($body)) {
     $request.Content = New-Object System.Net.Http.StringContent $body, ([Text.Encoding]::UTF8), 'application/json'
   }
   $response = $client.SendAsync($request).GetAwaiter().GetResult()
