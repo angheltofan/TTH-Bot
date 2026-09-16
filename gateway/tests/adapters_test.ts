@@ -62,7 +62,7 @@ Deno.test("activities: a device override that is missing or disabled is refused"
 
 Deno.test("activities: rows are validated", () => {
   const row = {
-    id: "x",
+    id: "0f8fad5b-d9cb-469f-a165-70867728950e",
     title: "Baschet",
     type: "lesson",
     prompt: "p",

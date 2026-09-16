@@ -38,8 +38,13 @@ const ACTIVITIES = [{
 function setup(cfg: GatewayConfig, rows: unknown[] = ACTIVITIES) {
   const logs: string[] = [];
   let upgraded = 0;
-  const fetchFn = (() =>
-    Promise.resolve(new Response(JSON.stringify(rows), { status: 200 }))) as typeof fetch;
+  // A PostgREST stand-in that honours the id filter used for a configured
+  // activity.
+  const fetchFn = ((input: string | URL) => {
+    const id = new URL(String(input)).searchParams.get("id")?.replace(/^eq\./, "");
+    const matching = id === undefined ? rows : rows.filter((r) => (r as { id: string }).id === id);
+    return Promise.resolve(new Response(JSON.stringify(matching), { status: 200 }));
+  }) as typeof fetch;
   const handler = createHandler({
     config: cfg,
     log: createLogger((l) => logs.push(l), () => "T"),

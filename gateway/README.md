@@ -96,6 +96,35 @@ provisioning on the robot's COM port, firewall, gates P3/P13/M2) is in
 private key (`.dev-certs/ca.key`) never leaves this machine; only `ca.pem`
 goes onto the robot.
 
+### Activities, prompts and real Gemini on the LAN (final-v1 V5)
+
+- **Per-device activity.** A registry entry's `activity_id` (a lowercase
+  UUID, validated when the registry is parsed) selects the activity. It is
+  loaded **fresh from Supabase on every device connection** with the
+  publishable key only (the anonymous read policy; never `service_role`), as
+  one row by id, with a bounded response. A device with `activity_id: null`
+  keeps the default selection (the first enabled push-to-talk activity, else
+  the first enabled one).
+- **Fail closed before Gemini.** A malformed, missing or disabled activity, a
+  prompt over 8 000 characters, more than 12 participants, an invalid
+  participant name, a composed instruction over 12 000 characters, or a
+  Supabase HTTP/network failure → HTTP 503 **before the WebSocket upgrade**:
+  no session, no token mint, no Gemini connection.
+- **Prompt.** `composeSystemInstruction` is the tested port of Flutter's
+  composer (base prompt generated from the Dart source + activity prompt +
+  participants sentence). The snapshot is frozen for the device session: a
+  Gemini reopen inside the session reuses it; a device reconnect loads a new
+  one.
+- **Logs** carry only fixed event names, the device id, the activity UUID and
+  bounded counters; the logger's field allow-list makes prompts, titles and
+  child names unloggable.
+- **Live mode on the LAN.** With `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` and
+  `GATEWAY_MINT_SECRET` in the ignored `.env`, start with
+  `$env:GEMINI_MODE = "live"` in the shell (the `.env` default stays `fake`).
+  The gateway holds no Gemini key: every session mints a single-use token
+  through `gateway-gemini-token` and connects to
+  `BidiGenerateContentConstrained`.
+
 ## Deployment — gated
 
 **No public deployment until both gates are met:**

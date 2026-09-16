@@ -6,7 +6,12 @@
 //        headers        Authorization: Bearer <device token>
 //                       X-TTH-Device: <device id>
 
-import { Activity, fetchEnabledActivities, resolveActivity } from "./activities.ts";
+import {
+  fetchActivityById,
+  fetchEnabledActivities,
+  ResolvedActivity,
+  resolveActivity,
+} from "./activities.ts";
 import {
   DEV_ACTIVITY,
   FAKE_ECHO_DEFAULTS,
@@ -23,7 +28,7 @@ import { Logger } from "./log.ts";
 import { composeSystemInstruction } from "./prompt.ts";
 import { SUBPROTOCOL } from "./protocol.ts";
 import { FailureBlocker, TokenBucket } from "./rate_limit.ts";
-import { authenticate, parseRegistry, Registry } from "./registry.ts";
+import { authenticate, DeviceRecord, parseRegistry, Registry } from "./registry.ts";
 import { DeviceSession } from "./session.ts";
 import { mintGeminiToken } from "./token_client.ts";
 
@@ -143,7 +148,6 @@ export interface ServerDeps {
   upgrade?: typeof Deno.upgradeWebSocket;
 }
 
-const ACTIVITY_CACHE_MS = 30_000;
 
 export function createHandler(deps: ServerDeps) {
   const { config, log } = deps;
@@ -163,15 +167,31 @@ export function createHandler(deps: ServerDeps) {
   const testControls = config.geminiMode === "fake"
     ? { creditHoldMs: config.fakeCreditHoldMs ?? 0, overCreditFrames }
     : undefined;
-  let activityCache: { at: number; list: Activity[] } | null = null;
-
-  const activities = async (): Promise<Activity[]> => {
-    if (config.geminiMode === "fake" && config.supabaseUrl === "") return [DEV_ACTIVITY];
-    const now = deps.now();
-    if (activityCache && now - activityCache.at < ACTIVITY_CACHE_MS) return activityCache.list;
+  // The activity for one connection, loaded FRESH from Supabase every time
+  // (no cache): a reconnect always gets a new snapshot, and the snapshot is
+  // immutable for the session built from it. Throws on a load failure.
+  const selectActivity = async (
+    device: DeviceRecord,
+  ): Promise<ResolvedActivity | "missing" | "disabled"> => {
+    if (config.geminiMode === "fake" && config.supabaseUrl === "") {
+      return resolveActivity([DEV_ACTIVITY], device.activityId) ?? "missing";
+    }
+    if (device.activityId !== null) {
+      const activity = await fetchActivityById(
+        deps.fetchFn,
+        config.supabaseUrl,
+        config.publishableKey,
+        device.activityId,
+      );
+      if (activity === null) return "missing";
+      if (!activity.enabled) return "disabled";
+      return {
+        activity,
+        convertedFromFreeConversation: activity.interactionMode === "free_conversation",
+      };
+    }
     const list = await fetchEnabledActivities(deps.fetchFn, config.supabaseUrl, config.publishableKey);
-    activityCache = { at: now, list };
-    return list;
+    return resolveActivity(list, null) ?? "missing";
   };
 
   const plain = (status: number, body: string) =>
@@ -216,17 +236,24 @@ export function createHandler(deps: ServerDeps) {
       return plain(429, "too many requests");
     }
 
-    let resolved;
+    // Everything below happens BEFORE the upgrade: a device whose activity
+    // cannot be loaded never gets a session, and Gemini is never contacted.
+    let selected: ResolvedActivity | "missing" | "disabled";
     try {
-      resolved = resolveActivity(await activities(), device.activityId);
+      selected = await selectActivity(device);
     } catch {
-      log.error("activities_unavailable", { device: device.id });
+      log.error("activities_unavailable", { device: device.id, activity: device.activityId ?? undefined });
       return plain(503, "activities unavailable");
     }
-    if (resolved === null) {
-      log.warn("activity_unavailable", { device: device.id });
+    if (selected === "missing" || selected === "disabled") {
+      log.warn("activity_unavailable", {
+        device: device.id,
+        activity: device.activityId ?? undefined,
+        code: selected,
+      });
       return plain(503, "activity unavailable");
     }
+    const resolved = selected;
     const problems = checkActivity(resolved.activity);
     const systemInstruction = composeSystemInstruction(resolved.activity);
     if (problems.length > 0 || systemInstruction.length > LIMITS.maxSystemInstructionChars) {

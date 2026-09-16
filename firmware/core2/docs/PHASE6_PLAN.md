@@ -1000,6 +1000,50 @@ is applied.
 
 ---
 
+### 12.1 Accelerated final-v1 path — progress
+
+Replaces step 6.4 (product-owner decision). Nothing is deployed publicly;
+`restrict_activity_writes` is not applied.
+
+| Step | Result |
+|---|---|
+| V1 | Reviewed work committed in logical commits and pushed (unrelated Flutter branding changes excluded). |
+| V2 | `GATEWAY_MINT_SECRET` generated and set on Supabase project `gashjedpdvcrzwryjiva` (TTH Bot) without being displayed; copy in the ignored `gateway/.env`. |
+| V3 | Migration history repaired for the two pre-existing migrations, then only `20260911190000_gateway_mint_admit.sql` applied; RLS, grants and `ok`/`replay`/`rate_limited` verified; activities unchanged. |
+| V4 | `gateway-gemini-token` deployed (v3). Google refused the SDK-style `liveConnectConstraints` REST body (HTTP 400, found with a status-only log); the request is now the documented `uses`/`expireTime`/`newSessionExpireTime`. The gateway connects ephemeral-token sessions to `BidiGenerateContentConstrained`. Signed mint → token → Gemini Live `setup_complete` verified; unsigned, malformed, wrong-signature and replayed assertions → 401. |
+| V5 | Per-device activity loaded fresh from Supabase with the publishable key, prompt composed like Flutter, fail-closed before Gemini — **physical LAN test PASSED** (below). |
+
+**V5 physical LAN test (2026-09-16), real Gemini, production firmware
+`core2-6.3`, device `tth-core2-01`, activity
+`a95ffc7e-1406-4a19-ac3b-6c27d8516b70` ("Conversație liberă", conversation,
+converted free-conversation → push-to-talk).**
+
+- READY on the pinned dev CA (TLS + upgrade 6.3 s, `tlsAllocFail=0`); every
+  device connection logged `session_hello` with the activity id and reached
+  `gemini_ready` through a freshly minted token.
+- **Four real turns**, all answered audibly: `ok=4 failed=0`. Up frames/bytes
+  and response frames/bytes agree exactly between robot and gateway on every
+  turn (e.g. turn 4: 165 frames / 105 472 B up; 456 frames / 872 642 B down).
+  First response 1.2–1.5 s after `turn_end` was written.
+- Capture: `failed=0 dropped=0` on every turn. Playback: `rejects=0
+  refusals=0` on every turn; `underruns` 0, 0, **1**, 0 — the known accepted
+  post-v1 prebuffer issue, not audible.
+- Credit under real Gemini (faster than real time): `zeroStalls` rose to 332,
+  ring high 193 200 of 290 304 B, `creditViolations=0` (capacity 0),
+  `badFrames=0 sendFail=0`, stale/cancelled/old-connection bytes 0; after each
+  answer `spent = consumed = returned`, `left=192000`.
+- Session: `state=ready failures=0 sessions=1`, pings answered (RTT 16–127
+  ms), `evDrop=0 txDrop=0`; no reboot during the conversation (session age
+  continuous to 189 s; the only power-on reset in the log is the deliberate
+  reset before the turns).
+- Memory (M3/M4 points, current values): lowest internal free 93 892 B with
+  largest block 90 100 B (≥ 32 000 / 24 000); `back to ready` 115 320–118 012
+  B, no progressive loss. Historical minimum 83 584 B, recorded separately.
+- Redaction, checked mechanically on both logs: no mint secret, publishable
+  key, device-token digest, Gemini token or API-key shape, JWT, bearer header,
+  assertion, activity or base-prompt text (162 prompt fragments checked),
+  title or participant name.
+
 ## 13. Files
 
 **New:** `gateway/` (Deno service, tests, `scripts/generate_base_prompt.ts`,
