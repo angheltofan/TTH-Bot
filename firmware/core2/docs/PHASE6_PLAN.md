@@ -1231,8 +1231,8 @@ inserted into `auth.users`, and TRUNCATE is never executed.
 10. Smoke test the live site: login, a wrong password (generic message),
     logout.
 
-**Result (2026-09-16), project TTH Bot `gashjedpdvcrzwryjiva`.** Steps 1–8
-done; steps 9–10 (Vercel) not started.
+**Result (2026-09-16/17), project TTH Bot `gashjedpdvcrzwryjiva`.** All steps
+done; the editor is live.
 
 - **Baseline:** 4 activities; REST SHA-256
   `4daeb5f25c427fa5043fc9122e11911e0322b795fffc5e3e4f3dbc3ee68c72e7`
@@ -1273,6 +1273,37 @@ done; steps 9–10 (Vercel) not started.
     password, prompt or Supabase error;
   - the only application log sites are the fixed `[Supabase] …` and
     `[ActivityWebApp] … (failure kind)` messages.
+
+**Deployment (2026-09-16/17).** The editor is live at
+**https://tth-bot.vercel.app**.
+
+- **Vercel project `tth-bot`** (`prj_FOZXidC5Djst6BWolA6ITMwpoXAG`, team
+  `angheltofans-projects`), created standalone and deployed from `build/web`
+  with the CLI: deployment `dpl_D2hxGK2ak4KPCHPfCzNPo2TbZgnS`, 44 compiled
+  files. `tth-bot.vercel.app` was assigned automatically.
+  - **No Git connection**, deliberately: deploys are manual
+    (`scripts/build_web.ps1` then `vercel deploy --prod` from `build/web`).
+  - `vercel link` writes a `.env.local` holding a `VERCEL_OIDC_TOKEN` and a
+    `.gitignore` into the deploy folder — **delete both before deploying**.
+- **Production checks:** the root serves the login page and `main.dart.js` is
+  byte-identical to the local build; the `vercel.json` security and cache
+  headers are present (Vercel adds HSTS); `/lib/main.dart`, `/pubspec.yaml`,
+  `/gateway/src/server.ts`, the migration, `/.git/config`, `.env`, `.env.local`,
+  `.vercel` and source maps all return 404; directory URLs 404 with no listing;
+  the build log holds no credential, prompt or activity content (a static site
+  has no runtime logs).
+- **Manual live test (product owner):** login as `admin`; the four activities
+  shown; a temporary activity created, edited and deleted; logout; after a
+  refresh only the login page. Afterwards: exactly 4 activities with the
+  baseline SHA-256, anonymous writes still refused, sign-up still disabled.
+- **Old Vercel project `web`:** it was Git-connected to `angheltofan/TTH-Bot`
+  and every push to `main` published the repository source as a static site
+  (root 404, but e.g. `/pubspec.yaml` served). The GitHub repository is public,
+  so nothing private was disclosed. **Git disconnected on 2026-09-17** (`vercel
+  git disconnect`), so pushes no longer deploy it. The project and its existing
+  deployments are kept for now — those old deployments still serve the source
+  until they are removed, a product-owner decision. The GitHub repository
+  itself was not modified.
 
 ## 13. Files
 
