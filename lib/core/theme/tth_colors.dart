@@ -26,6 +26,13 @@ abstract final class TthColors {
 
   static const Color webCardBorder = Color(0xFFE1ECF5);
 
+  /// Pale blue-grey behind the white cards of the admin dashboard, a little
+  /// deeper than [webBackground] so the cards read as raised surfaces.
+  static const Color webDashboardBackground = Color(0xFFEFF4F9);
+
+  /// Soft navy-tinted shadow for those cards and the top header.
+  static const Color webShadow = Color(0x140B2438);
+
   /// Deep navy/near-black background for the robot face.
   static const Color faceBackground = Color(0xFF060F1A);
 

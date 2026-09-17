@@ -436,7 +436,7 @@ void main() {
       repository.loadError = const ActivityRepositoryException(
         ActivityFailure.sessionExpired,
       );
-      await tester.tap(find.byTooltip('Reîncarcă'));
+      await tester.tap(find.byTooltip('Actualizează'));
       await tester.pumpAndSettle();
       await _finish(tester);
     } finally {
