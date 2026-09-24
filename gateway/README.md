@@ -125,6 +125,16 @@ goes onto the robot.
   through `gateway-gemini-token` and connects to
   `BidiGenerateContentConstrained`.
 
+## Raspberry Pi LAN host
+
+The unattended LAN gateway runs natively on a Raspberry Pi 4 (Raspberry Pi
+OS Lite 64-bit, `192.168.1.150`), with Deno 2.9.6 under `systemd`,
+`GEMINI_MODE=live` and a certificate from the existing dev CA. The runbook
+covers secret transfer (no values displayed, `ca.key` stays on Windows), the
+certificate, the systemd unit, releases pinned to a commit with automatic
+health-checked rollback, the robot URL change and the LAN firewall:
+[deploy/README.md](deploy/README.md).
+
 ## Deployment — gated
 
 **No public deployment until both gates are met:**

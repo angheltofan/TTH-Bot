@@ -1,0 +1,72 @@
+# TTH gateway on the Raspberry Pi LAN host (gateway/deploy/README.md).
+#
+# Installed by gateway/deploy/pi_release.sh from the release being activated;
+# do not edit the installed copy: change this file, commit, and deploy.
+#
+# Secrets never enter the unit or the release: systemd hands the three files
+# below to the service as credentials (read-only, in a per-service directory,
+# %d). Only root can read the originals in /etc/tth-gateway.
+#
+# The ignored .env is copied from Windows byte-identical. Deno's --env-file
+# never overrides a variable that is already set, so the Environment= lines
+# below win over its GEMINI_MODE=fake, PORT and relative TLS paths.
+
+[Unit]
+Description=TTH Bot gateway (Deno)
+Documentation=https://github.com/angheltofan/TTH-Bot/blob/main/gateway/deploy/README.md
+# The mint assertion's timestamp must be within 60 s and TLS needs the right
+# time; the Pi has no RTC. time-sync.target waits for NTP only while
+# systemd-time-wait-sync.service is enabled (pi_release.sh setup enables it).
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+# Never give up restarting: the Pi runs unattended. RestartSteps backs off.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+DynamicUser=yes
+WorkingDirectory=/opt/tth-gateway/current/gateway
+
+LoadCredential=gateway.env:/etc/tth-gateway/gateway.env
+LoadCredential=gateway.pem:/etc/tth-gateway/tls/gateway.pem
+LoadCredential=gateway.key:/etc/tth-gateway/tls/gateway.key
+
+Environment=GEMINI_MODE=live PORT=8443 TLS_CERT_FILE=%d/gateway.pem TLS_KEY_FILE=%d/gateway.key
+Environment=DENO_DIR=%C/tth-gateway DENO_NO_UPDATE_CHECK=1 NO_COLOR=1
+CacheDirectory=tth-gateway
+
+ExecStart=/usr/local/bin/deno run --no-prompt --allow-net --allow-env --allow-read=%d --env-file=%d/gateway.env main.ts
+
+Restart=always
+RestartSec=5s
+RestartSteps=6
+RestartMaxDelaySec=5min
+# No SIGTERM handler (product decision): devices see the connection drop and
+# reconnect, exactly as after Ctrl+C on the development machine.
+KillMode=mixed
+TimeoutStopSec=15s
+
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+LockPersonality=yes
+MemoryMax=1G
+# MemoryDenyWriteExecute is deliberately NOT set: V8's JIT needs W+X memory.
+
+[Install]
+WantedBy=multi-user.target
